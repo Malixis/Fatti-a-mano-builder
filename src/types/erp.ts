@@ -39,11 +39,52 @@ export const CANVAS_PRESETS: CanvasPreset[] = [
 
 export type DrawingToolId =
   | 'select'
-  | 'brush'
+  | 'direct-select'
+  | 'pen'
   | 'blob'
+  | 'brush'
+  | 'text-box'
+  | 'shape'
   | 'checkerboard'
   | 'stamp'
+  | 'eyedropper'
   | 'textured-text';
+
+export type BlobDrawMode = 'freeform-lasso' | 'blob-brush-merge';
+
+export type ShapePrimitiveKind = 'rect' | 'ellipse' | 'polygon' | 'star';
+
+export type BuilderFontFamily = 'Montserrat' | 'Akena Otos';
+
+export type BuilderFontWeight = 100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900;
+
+export interface FontDeclinationOption {
+  id: string;
+  label: string;
+  weight: BuilderFontWeight;
+  italic: boolean;
+}
+
+export const FONT_DECLINATIONS: FontDeclinationOption[] = [
+  { id: '100-normal', label: 'Thin (100)', weight: 100, italic: false },
+  { id: '100-italic', label: 'Thin Italic (100i)', weight: 100, italic: true },
+  { id: '200-normal', label: 'ExtraLight (200)', weight: 200, italic: false },
+  { id: '200-italic', label: 'ExtraLight Italic (200i)', weight: 200, italic: true },
+  { id: '300-normal', label: 'Light (300)', weight: 300, italic: false },
+  { id: '300-italic', label: 'Light Italic (300i)', weight: 300, italic: true },
+  { id: '400-normal', label: 'Regular (400)', weight: 400, italic: false },
+  { id: '400-italic', label: 'Italic (400i)', weight: 400, italic: true },
+  { id: '500-normal', label: 'Medium (500)', weight: 500, italic: false },
+  { id: '500-italic', label: 'Medium Italic (500i)', weight: 500, italic: true },
+  { id: '600-normal', label: 'SemiBold (600)', weight: 600, italic: false },
+  { id: '600-italic', label: 'SemiBold Italic (600i)', weight: 600, italic: true },
+  { id: '700-normal', label: 'Bold (700)', weight: 700, italic: false },
+  { id: '700-italic', label: 'Bold Italic (700i)', weight: 700, italic: true },
+  { id: '800-normal', label: 'ExtraBold (800)', weight: 800, italic: false },
+  { id: '800-italic', label: 'ExtraBold Italic (800i)', weight: 800, italic: true },
+  { id: '900-normal', label: 'Black (900)', weight: 900, italic: false },
+  { id: '900-italic', label: 'Black Italic (900i)', weight: 900, italic: true },
+];
 
 export type TextureFilterType =
   | 'none'
@@ -60,7 +101,13 @@ export type StampKind =
   | 'brush-zig'
   | 'thread-loop';
 
-export type FontStyleId = 'editorial-serif' | 'craft-rounded' | 'mono-label' | 'freehand-glyphs';
+export type FontStyleId =
+  | 'Montserrat'
+  | 'Akena Otos'
+  | 'editorial-serif'
+  | 'craft-rounded'
+  | 'mono-label'
+  | 'freehand-glyphs';
 
 export type PartnerLogoShape = 'circle-seal' | 'arch-badge' | 'botanical-crest' | 'minimal-box';
 
@@ -98,7 +145,7 @@ export interface PointerSample {
 export interface VectorElement {
   id: string;
   name: string;
-  type: 'freehand' | 'blob' | 'checkerboard' | 'stamp' | 'textured-text';
+  type: 'freehand' | 'blob' | 'checkerboard' | 'stamp' | 'textured-text' | 'text-box' | 'shape' | 'pen-path';
   x: number;
   y: number;
   width: number;
@@ -107,6 +154,11 @@ export interface VectorElement {
   scale: number;
   color: BrandColorHex;
   secondaryColor?: BrandColorHex;
+  strokeColor?: BrandColorHex;
+  strokeWidth?: number;
+  strokeDasharray?: string;
+  flipX?: boolean;
+  flipY?: boolean;
   opacity: number;
   zIndex: number;
   visible: boolean;
@@ -114,10 +166,20 @@ export interface VectorElement {
   pathData: string;
   secondaryPathData?: string;
   subPaths?: Array<{ d: string; fill?: string; stroke?: string; strokeWidth?: number }>;
-  strokeWidth?: number;
+  controlPoints?: Array<{ x: number; y: number }>;
+  shapeKind?: ShapePrimitiveKind;
+  cornerRadius?: number;
   stampKind?: StampKind;
   textureType: TextureFilterType;
   textContent?: string;
+  fontFamily?: BuilderFontFamily;
+  fontWeight?: BuilderFontWeight;
+  fontItalic?: boolean;
+  letterSpacing?: number;
+  lineHeight?: number;
+  textAlign?: 'left' | 'center' | 'right';
+  textTransform?: 'none' | 'uppercase' | 'lowercase';
+  textBoxWidth?: number;
   fontStyle?: FontStyleId;
   fontSize?: number;
   isHandDrawnText?: boolean;

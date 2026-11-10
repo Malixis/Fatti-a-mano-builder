@@ -1,52 +1,77 @@
-# Persistenza Cloud Multi-Dispositivo: Fix Ripristino Scheda & Salvataggio Automatico del Builder Grafico
+# Evoluzione Builder Grafico: Workstation Vettoriale Stile Adobe Illustrator, Caselle di Testo (Montserrat & Akena Otos) e Macchia Blob a Mano Libera
 
-Questo piano risolve in modo definitivo il problema per cui le modifiche alla **Scheda Laboratorio** venivano ripristinate ai vecchi valori premendo **Salva su Account**, e introduce il **salvataggio automatico continuo e multi-dispositivo** per il **Builder Grafico**, facendo sì che ogni Scheda Laboratorio conservi la propria locandina vettoriale su tutti i dispositivi collegati all'Account Google.
+Questo piano trasforma il **Builder Grafico** di *Fatti a mano* in un ambiente di progettazione vettoriale professionale ispirato all'architettura e agli strumenti di **Adobe Illustrator**, integrando **Caselle di Testo** dedicate con le due sole famiglie tipografiche **Montserrat** e **Akena Otos** (in tutte le loro declinazioni di peso e stile), lo strumento **Macchia Blob a mano libera col cursore** (senza vincolo rettangolare) e la persistenza Cloud multi-dispositivo di ogni proprietà vettoriale.
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> Le scelte confermate garantiscono che nessuna modifica su Scheda, Partner, Inventario o Builder Grafico vada mai persa, né lavorando in locale né cambiando dispositivo (es. da Mac a iPad Pro).
+> Tutte le preferenze confermate nella fase di chiarimento sono state integrate nell'architettura del nuovo Builder Grafico.
 
-- **Decisione Confermata 1 — Modalità di Salvataggio**: **Salvataggio automatico continuo (debounced) + bottone Salva manuale** con indicatore visivo di sincronizzazione Cloud e timestamp di ultimo salvataggio.
-- **Decisione Confermata 2 — Architettura Progetti del Builder Grafico**: **Ogni Scheda Laboratorio conserva la propria locandina dedicata nel Builder** (`tpl-<workshopId>`), oltre agli appunti vettoriali (clipboard), dimensioni canvas e Partner selezionato. Passando da una Scheda Laboratorio all'altra, il Builder carica automaticamente il progetto grafico di quella scheda senza sovrascrivere le modifiche fatte manualmente dall'utente.
+- **Decisione Confermata 1 — Tema Interfaccia Builder**: **Switch istantaneo tra Tema Scuro Adobe Pro (`#1E1E1E` / `#252526` / `#333333`) e Tema Studio Beige Kraft (`#EADDCD` / `#F4ECE1` / `#1A2B4C`)**, per lavorare con il contrasto tipico di Adobe Illustrator oppure in continuità cromatica col brand *Fatti a mano*.
+- **Decisione Confermata 2 — Strumento Macchia Blob col Cursore**: **Doppia modalità a mano libera** attivabile col cursore/Apple Pencil:
+  1. **Lazo Forma Libera (`Freeform Blob Lasso`)**: muovendo liberamente il cursore o la Apple Pencil si disegna il perimetro di qualsiasi forma organica; al rilascio, il tracciato viene chiuso morbidamente con curve di Bézier/Chaikin e riempito di colore senza alcun vincolo di quadrato o rettangolo.
+  2. **Pennello Blob Unione (`Illustrator Blob Brush — Shift+B`)**: disegna un tratto pieno organico che si fonde/unisce alle forme Blob adiacenti dello stesso colore per scolpire macchie complesse a mano libera.
+- **Decisione Confermata 3 — Motore Tipografico Caselle di Testo**: **Due sole famiglie di font nel selettore tipografico (`Montserrat` e `Akena Otos`)** con **tutte le declinazioni integrate** (Thin 100, ExtraLight 200, Light 300, Regular 400, Medium 500, SemiBold 600, Bold 700, ExtraBold 800, Black 900 + varianti *Italic*) più la possibilità di **caricare il file font originale `.otf` / `.ttf` / `.woff2`** (tramite `FontFace` API salvato in locale) per un rendering tipografico identico al file master.
 
 ---
 
 ## 1. Overview & Core Concept
 
-- **Diagnosi del Bug di Ripristino ("Salva Scheda ripristina le modifiche")**:
-  1. **Conflitto Timestamp & Campi nelle Security Rules (`firestore.rules`)**: Durante l'aggiornamento di una scheda esistente, `saveWorkshopToCloud` inviava sempre `createdAt: serverTimestamp()` e il campo `calendarEventUrl`, mentre `firestore.rules` imponeva `incoming().createdAt == existing().createdAt` e un controllo rigoroso `hasOnly(...)` sulle chiavi ammesse.
-  2. **Rollback della Cache Firestore (`onSnapshot`)**: Quando Firestore rifiutava la scrittura di aggiornamento (`update`), il listener in tempo reale `onSnapshot` emetteva un evento di rollback ripristinando nello stato React la vecchia versione salvata sul server e cancellando le modifiche appena digitate dall'utente.
-  3. **Mancata Persistenza del Builder Grafico**: Gli elementi vettoriali del Builder (`canvasElements`, `clipboardAssets`, `canvasSize`) vivevano solo in memoria React volatile e non venivano né salvati in `localStorage` per singola scheda né sincronizzati automaticamente con la collezione Cloud `templates` all'accesso o al cambio dispositivo.
-- **Key Value**:
-  - **Zero Rollback delle Modifiche**: Sincronizzazione allineata tra payload sanitizzati, timestamp `createdAt` immutabile sugli aggiornamenti e regole `firestore.rules`, con protezione delle modifiche locali più recenti (`updatedAtMs`).
-  - **Persistenza Totale del Builder Grafico per Scheda**: Ogni disegno a mano libera con Apple Pencil, testo texturizzato, spostamento livelli, cambio colore o asset Partner viene salvato istantaneamente in locale e sincronizzato automaticamente sul Cloud Firestore (`templates/tpl-{workshopId}`) dell'account Google connesso.
+- **Cosa Fa**:
+  1. **Interfaccia e Funzioni Adobe Illustrator**: Riorganizza il Builder con la classica disposizione professionale di Illustrator: **Barra di Controllo Contestuale Superiore** (Allineamento, Pathfinder, Undo/Redo, Righelli, Griglia, Riempimento/Traccia), **Dock Strumenti Verticale a Sinistra** (con scorciatoie da tastiera standard `V`, `A`, `P`, `B`, `Shift+B`, `T`, `M`, `L`, `I`, `H`, `Z`), **Tavola da Disegno (Artboard) con Righelli e Guide** al centro, e **Pannelli Studio Collassabili a Destra** (*Proprietà & Trasforma*, *Carattere & Caselle di Testo*, *Tracciati & Pathfinder*, *Livelli & Asset Partner*).
+  2. **Caselle di Testo (`Type Box Tool — T`) con Montserrat & Akena Otos**: Permette di cliccare o trascinare sul canvas per creare una Casella di Testo ridimensionabile con wrapping automatico o testo su punto, scegliendo esclusivamente tra **Montserrat** e **Akena Otos** e selezionando qualsiasi declinazione (da `100 Thin` a `900 Black`, normale o `Italic`), crenatura (`letter-spacing`), interlinea (`line-height`), allineamento (`Sinistra`, `Centro`, `Destra`), colore di riempimento, traccia contorno e filtro texture.
+  3. **Macchia Blob Disegnata col Cursore**: Elimina il trascinamento a scatola rettangolare a favore del disegno libero col cursore/Apple Pencil, mostrando in tempo reale l'anteprima fluida della forma organica mentre muovi il puntatore in qualsiasi direzione.
 
 ---
 
 ## 2. User Experience & Visual Design
 
-- **Flusso Operativo Continuo (Lab Manager ↔ Builder Grafico ↔ Cambio Dispositivo)**:
-  1. **Modifica nella Scheda Laboratorio**: Ogni modifica a titolo, fasi operative, partner, data o calcolatore aggiorna immediatamente il timestamp locale e avvia il salvataggio automatico (con debounce di 700ms) su Cloud Firestore senza mai subire rollback da vecchi snapshot.
-  2. **Modifica nel Builder Grafico o Font & Texture**: Qualsiasi tratto disegnato, timbro inserito, testo texturizzato o ridimensionamento canvas viene associato alla Scheda Laboratorio attiva e salvato automaticamente sia su `localStorage` sia sulla collezione Cloud `templates` dell'utente.
-  3. **Passaggio tra Schede o Uso di "Genera Locandina"**:
-     - Selezionando una Scheda Laboratorio diversa, il Builder mostra automaticamente la locandina associata a quella scheda.
-     - Premendo **Genera Locandina (1080×1350)** dalla scheda, se l'utente ha già personalizzato la locandina nel Builder, i testi (Titolo, Prezzo, Data, Location, Partner) vengono aggiornati preservando i disegni e i livelli aggiunti dall'utente, con possibilità di rigenerare da zero il layout se desiderato.
-  4. **Accesso da un Nuovo Dispositivo (es. iPad Pro)**: Appena effettuato l'accesso con Google, l'app scarica schede, partner, inventario e tutte le locandine del Builder (`subscribeUserTemplates`), fondendo eventuali modifiche locali più recenti senza mai sovrascriverle con dati più vecchi.
-- **Visual Identity & Theme**:
-  - **Palette Brand-Safe**: Sfondo Beige Kraft (`#EADDCD`), superfici strutturali Avorio Carta (`#F4ECE1`), testo principale Blu Notte (`#1A2B4C`), accenti operativi Terracotta (`#B85B43`), Verde Bosco (`#4A6B53`) e Ocra (`#D4A373`).
-  - **Feedback di Stato Non Intrusivo**: Indicatore testuale sobrio nella barra della Scheda e del Builder (`"Salvato in automatico · Cloud sincronizzato"`) senza popup bloccanti.
+- **Architettura Workspace Stile Adobe Illustrator**:
+  - **Barra di Controllo Contestuale (Top Control Bar)**:
+    - Selettore Scheda Laboratorio attiva + Switch **Tema Adobe Dark Pro / Tema Kraft Studio**.
+    - Cronologia **Annulla / Ripristina (`Undo` / `Redo`, `Ctrl+Z` / `Ctrl+Shift+Z`)** fino a 40 passaggi.
+    - Controlli rapidi **Riempimento (`Fill`)** e **Traccia (`Stroke` + spessore + tratteggio)**.
+    - Strumenti **Allinea & Distribuisci** sul canvas o tra livelli (Allinea a sinistra, centro orizzontale, destra, alto, centro verticale, basso).
+    - Azioni **Elaborazione Tracciati (Pathfinder)**: *Unisci Forme*, *Sottrai Sopra*, *Converti in Forma Blob*, *Duplica*, *Rifletti Orizzontale/Verticale*.
+    - Toggle **Righelli Pixel (`Rulers`)**, **Griglia di Precisione (`Grid`)** e **Guide Smart (`Smart Guides`)**.
+  - **Toolbar Verticale Sinistra (Illustrator Tool Dock)**:
+    - `V` — **Selezione (`Selection Tool`)**: seleziona, sposta, ruota e scala tramite maniglie di trasformazione (Bounding Box con 8 anchor handles).
+    - `A` — **Selezione Diretta Nodi (`Direct Selection Tool`)**: mostra i vertici/punti di ancoraggio del tracciato SVG selezionato e permette di trascinare i singoli nodi col cursore per deformare qualsiasi macchia o curva!
+    - `P` — **Penna Bézier (`Pen Tool`)**: clicca punto per punto per creare tracciati vettoriali e forme poligonali/curve chiuse.
+    - `Shift+B` — **Macchia Blob col Cursore (`Freeform Blob Lasso & Blob Brush`)**: disegna liberamente con il cursore qualsiasi sagoma organica chiusa o espandi una macchia esistente.
+    - `B` — **Pennello Fluido Calligrafico (`Fluid Brush`)**: tratto sensibile a pressione Apple Pencil e velocità trackpad.
+    - `T` — **Casella di Testo (`Text Box Tool`)**: crea e modifica caselle di testo con le famiglie **Montserrat** e **Akena Otos**.
+    - `M` / `L` — **Forme Geometriche & Wavy Checkerboard**: Rettangolo/ Riquadro arrotondato, Ellisse, Poligono/Stella e Scacchiera Ondulata.
+    - `S` — **Timbri Brand (`Stamps`)**: sigilli e ritagli Matisse.
+    - `I` — **Contagocce (`Eyedropper`)**: campiona colore, font, peso e texture da qualsiasi elemento sul canvas.
+- **Pannello Carattere & Casella di Testo (Montserrat & Akena Otos)**:
+  - Selettore **Famiglia Font**:
+    1. **Montserrat** (Sans-Serif Geometrico Contemporaneo)
+    2. **Akena Otos** (Display Editoriale & Organico ad Alto Contrasto + supporto caricamento file `.otf`/`.ttf`/`.woff2` personalizzato)
+  - Selettore **Declinazione (Peso & Stile)**:
+    - `Thin (100)`, `Thin Italic (100i)`
+    - `ExtraLight (200)`, `ExtraLight Italic (200i)`
+    - `Light (300)`, `Light Italic (300i)`
+    - `Regular (400)`, `Italic (400i)`
+    - `Medium (500)`, `Medium Italic (500i)`
+    - `SemiBold (600)`, `SemiBold Italic (600i)`
+    - `Bold (700)`, `Bold Italic (700i)`
+    - `ExtraBold (800)`, `ExtraBold Italic (800i)`
+    - `Black (900)`, `Black Italic (900i)`
+  - Controlli tipografici di precisione: Corpo (`fontSize`), Interlinea (`lineHeight`), Crenatura/Tracking (`letterSpacing`), Larghezza Casella di Testo (`textBoxWidth` per a-capo automatico), Allineamento (`left`, `center`, `right`), Trasformazione (` Normale`, `TUTTO MAIUSCOLO`, `tutto minuscolo`), Riempimento, Contorno e Texture SVG.
 
 ---
 
 ## 3. Key Product Decisions & Trade-Offs
 
-- **Decisione 1: Gestione Immutabile di `createdAt` e Allineamento Schema Firestore**
-  - *Approccio Scelto*: Conservare `createdAt` originale quando il documento esiste già (usando `setDoc` con verifica o preservazione dei campi immutabili e aggiornando `firestore.rules` e `firebase-blueprint.json` in perfetto sincronismo) + aggiungere un timestamp numerico `clientUpdatedAt` per risolvere eventuali conflitti tra stato locale e snapshot cloud.
-  - *Perché*: Impedisce che le regole di sicurezza rifiutino gli aggiornamenti successivi al primo salvataggio e garantisce che `onSnapshot` non sovrascriva mai modifiche locali più recenti.
-- **Decisione 2: Mappa Locandine per Scheda (`designsByWorkshopId`) con Auto-Sync Cloud**
-  - *Approccio Scelto*: Archiviare un dizionario indicizzato per `workshopId` contenente `{ elements, clipboard, width, height, presetId, partnerId, clientUpdatedAt }`, persistito in `localStorage` e sincronizzato con la collezione Firestore `/templates/tpl-{workshopId}` tramite listener real-time `subscribeUserTemplates` e salvataggio automatico debounced.
-  - *Perché*: Permette di lavorare su più laboratori contemporaneamente (es. "Paint & Wine", "Rilega il tuo Diario", "Ceramica & Calici") ritrovando su qualsiasi dispositivo la locandina esatta di ciascun laboratorio.
+- **Decisione 1: Disegno Libero della Macchia Blob col Cursore (`generateFreeformCursorBlobPath`)**
+  - *Approccio Scelto*: Quando l'utente muove il cursore o la Apple Pencil con lo strumento **Macchia Blob**:
+    - In modalità **Lazo Forma Libera**, tutti i punti disegnati dal cursore vengono campionati, regolarizzati con smoothing iterativo di Chaikin + spline Catmull-Rom chiusa (`closedCatmullRomToBezier`) e opzionalmente arricchiti da micro-ondulazione organica regolabile (`Morbidezza Organica 0%–100%`), creando esattamente la sagoma perimetrale tracciata dall'utente.
+    - In modalità **Pennello Blob Unione**, l'inviluppo del tratto disegnato col cursore (`getStroke` con raggio pieno e cap arrotondati) genera un poligono morbido chiuso che può fondersi in un unico tracciato composto con la macchia selezionata.
+  - *Perché*: Offre libertà creativa totale (stelle morbide, sagome a C, isole asimmetriche, cornici organiche, ritagli stile Matisse) impossibile da ottenere con un generatore rettangolare.
+- **Decisione 2: Tutte le Declinazioni di Montserrat e Akena Otos + Caricamento Font Master**
+  - *Approccio Scelto*: Includere l'intera famiglia variabile **Montserrat** (`ital,wght@0,100..900;1,100..900`) e configurare la famiglia `@font-face` **Akena Otos** in tutte le sue declinazioni di peso (`100`–`900`) e stile (`normal` / `italic`), aggiungendo nel pannello Carattere un pulsante **"Carica file font Akena Otos / Custom (.otf, .ttf, .woff2)"** che registra il font tramite `FontFace` API del browser e lo salva in `localStorage` (base64 data URL) per mantenerlo sempre attivo.
+  - *Perché*: Garantisce che tutte le 18 declinazioni di entrambi i font funzionino immediatamente e che, caricando il file `.otf`/`.ttf` originale di *Akena Otos*, ogni glifo rispecchi al 100% il file tipografico proprietario.
 
 ---
 
@@ -55,41 +80,50 @@ Questo piano risolve in modo definitivo il problema per cui le modifiche alla **
 ### Architecture & Component Diagram
 
 ```text
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                        App State & Sync Engine (App.tsx)                     │
-│  • workshops[] + activeWorkshopId                                            │
-│  • designsByWorkshopId[workshopId] (elements, clipboard, size, partnerId)    │
-│  • partners[] & inventory[]                                                  │
-│  • Auto-Save Debouncer (700ms) + Manual Save ("Salva su Account / Cloud")    │
-└───────────────┬──────────────────────────────────────────────┬───────────────┘
-                │                                              │
-                ▼                                              ▼
-┌─────────────────────────────────────────┐  ┌─────────────────────────────────┐
-│     Persistenza Locale Immediata        │  │  Cloud Firestore Sync (Auth)    │
-│  • localStorage (v3 keys + timestamps)  │  │  • /workshops/{id}              │
-│  • Ripristino istantaneo offline/reload │  │  • /templates/tpl-{workshopId}  │
-│  • Protezione anti-rollback su input    │  │  • /partners/{id}               │
-└───────────────┬─────────────────────────┘  │  • /inventory/{id}              │
-                │                            └─────────────────┬───────────────┘
-                └──────────────────────┬───────────────────────┘
-                                       ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                 Moduli Operativi Sincronizzati Multi-Device                  │
-│  ┌────────────────────────┐  ┌────────────────────────┐  ┌────────────────┐  │
-│  │    LabManager ERP      │  │    GraphicBuilder      │  │ Font & Texture │  │
-│  │ • Scheda + Fasi + ROI  │  │ • Canvas SVG per Lab   │  │ • Iniezione    │  │
-│  │ • Ponte Data-Binding   │  │ • Livelli + Clipboard  │  │   diretta nel  │  │
-│  │   preserva disegni     │  │ • Auto-save ogni tratto│  │   design attivo│  │
-│  └────────────────────────┘  └────────────────────────┘  └────────────────┘  │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                   Illustrator Control Bar (Top Contextual Bar)                     │
+│  [Progetto Scheda] [Undo/Redo] [Fill/Stroke] [Align 6x] [Pathfinder] [Dark/Kraft]  │
+├──────────┬──────────────────────────────────────────────────────┬──────────────────┤
+│          │              Righello Orizzontale (px)               │ Pannelli Studio  │
+│   Tool   ├────┬─────────────────────────────────────────────────┤ (Destra):        │
+│   Dock   │ R  │                                                 │                  │
+│ (Sin.)   │ i  │          Artboard Vettoriale Interattiva        │ • Carattere &    │
+│          │ g  │                                                 │   Casella Testo  │
+│ • [V] Sel│ h  │  • Bounding Box 8-Handle (Scala/Ruota)          │   - Montserrat   │
+│ • [A] Nod│ e  │  • Editing Diretto Nodi (Trascina Vertici)      │   - Akena Otos   │
+│ • [P] Pen│ l  │  • Lazo Macchia Blob a Mano Libera col Cursore  │   - 18 Pesi/Stili│
+│ • [B]Blb │ l  │  • Caselle di Testo Ridimensionabili            │   - Upload .OTF  │
+│ • [B] Brs│ o  │    (Montserrat & Akena Otos, 100..900 + Italic) │ • Trasforma &    │
+│ • [T] Txt│    │  • Guide Smart & Griglia Vettoriale             │   Aspetto        │
+│ • [M] Shp│ V  │                                                 │ • Pathfinder &   │
+│ • [S] Stp│ e  │                                                 │   Nodi           │
+│ • [I] Eye│ r  │                                                 │ • Livelli &      │
+│ • [Z] Zm │ t  │                                                 │   Partner Kit    │
+└──────────┴────┴─────────────────────────────────────────────────┴──────────────────┘
+                                         │
+                                         ▼
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│          Persistenza Automatica Multi-Device (localStorage + Cloud Firestore)      │
+│  • Salva ogni elemento con fontFamily, fontWeight, fontStyleItalic, letterSpacing, │
+│    lineHeight, textAlign, textBoxWidth, strokeColor, strokeWidth, points[]         │
+└────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Data Model & State Synchronization
 
-1. **Allineamento `firebase-blueprint.json` + `firestore.rules` + Sanitizzazione**:
-   - Ogni entità (`Workshop`, `Partner`, `InventoryItem`, `DesignTemplate`) include `clientUpdatedAt` (numero millisecondi) e tutte le chiavi effettivamente inviate dal client (`calendarEventUrl`, `unitCost`, `totalPiecesOrdered`, `piecesUsedTotal`, `piecesAvailable`, `clipboard`, `workshopId`, `partnerId`).
-   - Nelle regole `firestore.rules`, le operazioni `create` e `update` validano lo schema completo e consentono l'aggiornamento atomico tramite `setDoc` mantenendo l'isolamento per `ownerId == request.auth.uid`.
-2. **Sincronizzazione Intelligente Stato Locale ↔ Cloud (`onSnapshot`)**:
-   - Quando l'utente modifica un campo nella Scheda Laboratorio o sposta/disegna un elemento nel Builder Grafico, viene aggiornato `clientUpdatedAt = Date.now()`.
-   - Quando arriva un aggiornamento da `subscribeUserWorkshops` o `subscribeUserTemplates`, il sistema confronta `cloudDoc.clientUpdatedAt` con `localDoc.clientUpdatedAt`: se la versione locale è più recente (es. l'utente sta scrivendo o ha appena salvato), mantiene la versione locale e la spinge sul Cloud, evitando qualsiasi ripristino involontario.
-   - Al primo login su un nuovo dispositivo (dove lo stato locale contiene solo i dati demo di default con `clientUpdatedAt = 0`), i documenti scaricati da Firestore sostituiscono immediatamente i dati demo caricando sia le Schede Laboratorio sia le rispettive locandine del Builder Grafico.
+1. **Estensione `VectorElement` (`src/types/erp.ts` + `src/firebase.ts` + `src/utils/roiCalculator.ts`)**:
+   - Nuovi attributi tipografici per le Caselle di Testo:
+     - `fontFamily?: 'Montserrat' | 'Akena Otos'`
+     - `fontWeight?: 100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900`
+     - `fontItalic?: boolean`
+     - `letterSpacing?: number` (in em/px)
+     - `lineHeight?: number` (es. `1.2`)
+     - `textAlign?: 'left' | 'center' | 'right'`
+     - `textTransform?: 'none' | 'uppercase' | 'lowercase'`
+     - `textBoxWidth?: number` (larghezza della casella di testo per l'andata a capo automatica)
+   - Nuovi attributi vettoriali stile Illustrator:
+     - `strokeColor?: string`, `strokeWidth?: number`, `strokeDasharray?: string`
+     - `flipX?: boolean`, `flipY?: boolean`
+     - `controlPoints?: Array<{ x: number; y: number }>` (punti di ancoraggio modificabili con lo strumento **Selezione Diretta Nodi `A`** per deformare qualsiasi Macchia Blob o tracciato Penna dopo averlo disegnato!).
+2. **Sincronizzazione Automatica Cloud Firestore**:
+   - Tutti i nuovi campi tipografici e vettoriali vengono inclusi in `sanitizeVectorElementsList` e `parseVectorElementFromCloud` così che ogni casella di testo in **Montserrat** o **Akena Otos** e ogni **Macchia Blob** disegnata col cursore vengano salvate in automatico e ritrovate identiche su qualsiasi dispositivo.

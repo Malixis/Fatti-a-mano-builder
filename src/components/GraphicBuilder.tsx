@@ -1,12 +1,17 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  BlobDrawMode,
   BRAND_PALETTE,
   BrandColorHex,
+  BuilderFontFamily,
+  BuilderFontWeight,
   CANVAS_PRESETS,
   CanvasPresetId,
   DrawingToolId,
+  FONT_DECLINATIONS,
   PartnerProfile,
   PointerSample,
+  ShapePrimitiveKind,
   StampKind,
   TextureFilterType,
   VectorElement,
@@ -16,35 +21,58 @@ import {
   buildPartnerVectorAssets,
   computeSamplePressure,
   generateBrandStamp,
+  generateFreeformCursorBlobPath,
   generateOrganicBlobPath,
+  generateShapePrimitivePath,
   generateSmoothedBrushPath,
   generateTextVectorBackdropPath,
   generateWavyCheckerboardPath,
+  rebuildPathFromControlPoints,
+  wrapPosterText,
 } from '../utils/vectorMath';
 import { exportSvgCanvas } from '../utils/pdfExporter';
 import { SvgTextureDefs, getFilterUrl } from './SvgTextureDefs';
 import {
+  AlignCenter,
+  AlignJustify,
+  AlignLeft,
+  AlignRight,
   ArrowDown,
   ArrowUp,
   Building2,
+  Check,
   ClipboardPaste,
+  Combine,
   Copy,
+  Crosshair,
   Download,
   Eye,
   EyeOff,
+  FlipHorizontal,
+  FlipVertical,
   Grid,
   Layers,
   Lock,
   Maximize2,
+  Moon,
   MousePointer,
+  Move,
   Paintbrush,
+  PenTool,
+  Pipette,
   Plus,
+  Redo2,
   RotateCcw,
+  Ruler,
+  Shapes,
   Sparkles,
   Stamp,
+  Sun,
   Trash2,
   Type,
+  Undo2,
   Unlock,
+  Upload,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
@@ -82,6 +110,35 @@ const STAMP_CATALOG: Array<{ id: StampKind; label: string }> = [
   { id: 'thread-loop', label: 'Filo Legatoria' },
 ];
 
+const SHAPE_CATALOG: Array<{ id: ShapePrimitiveKind; label: string }> = [
+  { id: 'rect', label: 'Rettangolo / Box' },
+  { id: 'ellipse', label: 'Ellisse / Cerchio' },
+  { id: 'polygon', label: 'Esagono Vettoriale' },
+  { id: 'star', label: 'Stella a 5 Punte' },
+];
+
+const BUILDER_FONT_FAMILIES: Array<{
+  id: BuilderFontFamily;
+  label: string;
+  subtitle: string;
+}> = [
+  {
+    id: 'Montserrat',
+    label: 'Montserrat',
+    subtitle: 'Geometric Sans-Serif · 18 Declinazioni (Thin 100 – Black 900 + Italic)',
+  },
+  {
+    id: 'Akena Otos',
+    label: 'Akena Otos',
+    subtitle: 'Editorial Display Serif · 18 Declinazioni (Thin 100 – Black 900 + Italic)',
+  },
+];
+
+const CUSTOM_FONT_STORAGE_KEYS: Record<BuilderFontFamily, string> = {
+  'Akena Otos': 'fatti_a_mano_custom_font_akena_otos',
+  Montserrat: 'fatti_a_mano_custom_font_montserrat',
+};
+
 export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
   elements,
   setElements,
@@ -103,8 +160,39 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
   isSavingCloud,
   lastSavedLabel,
 }) => {
-  const [activeTool, setActiveTool] = useState<DrawingToolId>('brush');
+  // Tema Interfaccia: 'adobe-dark' (Stile Adobe Illustrator Pro) | 'kraft-light' (Beige Kraft Fatti a mano)
+  const [workspaceTheme, setWorkspaceTheme] = useState<'adobe-dark' | 'kraft-light'>(() => {
+    try {
+      const saved = localStorage.getItem('fatti_a_mano_builder_theme');
+      return saved === 'kraft-light' ? 'kraft-light' : 'adobe-dark';
+    } catch {
+      return 'adobe-dark';
+    }
+  });
+
+  const toggleWorkspaceTheme = () => {
+    setWorkspaceTheme((prev) => {
+      const next = prev === 'adobe-dark' ? 'kraft-light' : 'adobe-dark';
+      try {
+        localStorage.setItem('fatti_a_mano_builder_theme', next);
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
+
+  // Strumento attivo stile Adobe Illustrator
+  const [activeTool, setActiveTool] = useState<DrawingToolId>('select');
+  const [blobMode, setBlobMode] = useState<BlobDrawMode>('freeform-lasso');
+  const [mergeBlobBrushWithSameColor, setMergeBlobBrushWithSameColor] = useState<boolean>(true);
+  const [blobRoughness, setBlobRoughness] = useState<number>(0.1);
+
+  // Impostazioni Colore Riempimento (Fill) & Traccia (Stroke)
   const [activeColor, setActiveColor] = useState<BrandColorHex>('#B85B43');
+  const [activeStrokeColor, setActiveStrokeColor] = useState<string>('none');
+  const [activeStrokeWidth, setActiveStrokeWidth] = useState<number>(0);
+  const [activeStrokeDash, setActiveStrokeDash] = useState<string>('');
   const [localBgColor, setLocalBgColor] = useState<BrandColorHex>('#EADDCD');
   const backgroundColor = externalBgColor || localBgColor;
   const setBackgroundColor = (hex: BrandColorHex) => {
@@ -113,16 +201,48 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
       setExternalBgColor(hex);
     }
   };
-  const [activeTexture, setActiveTexture] = useState<TextureFilterType>('rough-brush');
+
+  // Impostazioni Tipografiche Casella di Testo (Solo Montserrat e Akena Otos)
+  const [activeFontFamily, setActiveFontFamily] = useState<BuilderFontFamily>('Montserrat');
+  const [activeFontWeight, setActiveFontWeight] = useState<BuilderFontWeight>(700);
+  const [activeFontItalic, setActiveFontItalic] = useState<boolean>(false);
+  const [activeFontSize, setActiveFontSize] = useState<number>(56);
+  const [activeLineHeight, setActiveLineHeight] = useState<number>(1.2);
+  const [activeLetterSpacing, setActiveLetterSpacing] = useState<number>(0);
+  const [activeTextAlign, setActiveTextAlign] = useState<'left' | 'center' | 'right'>('center');
+  const [activeTextTransform, setActiveTextTransform] = useState<'none' | 'uppercase' | 'lowercase'>('none');
+  const [customLoadedFonts, setCustomLoadedFonts] = useState<Record<BuilderFontFamily, string>>({
+    Montserrat: '',
+    'Akena Otos': '',
+  });
+
+  // Impostazioni Forme, Timbri e Texture
+  const [activeTexture, setActiveTexture] = useState<TextureFilterType>('none');
   const [activeStamp, setActiveStamp] = useState<StampKind>('seal-fatti-a-mano');
-  const [brushSize, setBrushSize] = useState<number>(22);
+  const [activeShapeKind, setActiveShapeKind] = useState<ShapePrimitiveKind>('rect');
+  const [activeCornerRadius, setActiveCornerRadius] = useState<number>(16);
+  const [brushSize, setBrushSize] = useState<number>(28);
+
+  // Selezione, Righelli, Griglia e Pannelli Studio
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [zoom, setZoom] = useState<number>(0.45);
+  const [selectedNodeIndex, setSelectedNodeIndex] = useState<number | null>(null);
+  const [showRulers, setShowRulers] = useState<boolean>(true);
+  const [showGrid, setShowGrid] = useState<boolean>(true);
+  const [rightDockTab, setRightDockTab] = useState<'character' | 'properties' | 'layers'>('character');
+  const [zoom, setZoom] = useState<number>(0.48);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  // Pen Tool (P) stato punti in costruzione
+  const [penDraftPoints, setPenDraftPoints] = useState<Array<{ x: number; y: number }>>([]);
+  const [cursorCoords, setCursorCoords] = useState<{ x: number; y: number }>({ x: 540, y: 675 });
+
+  // Undo / Redo Stack (fino a 40 step)
+  const [historyPast, setHistoryPast] = useState<VectorElement[][]>([]);
+  const [historyFuture, setHistoryFuture] = useState<VectorElement[][]>([]);
 
   // Input & Pointer telemetry per Apple Pencil / Trackpad / Palm Rejection
   const [pointerModeLabel, setPointerModeLabel] = useState<string>(
-    'Pronto · Supporto Trackpad & Apple Pencil'
+    'Illustrator Vector Engine · Supporto Cursore, Trackpad & Apple Pencil'
   );
   const [livePressure, setLivePressure] = useState<number>(0.5);
   const [liveSamples, setLiveSamples] = useState<PointerSample[]>([]);
@@ -135,6 +255,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const fontFileInputRef = useRef<HTMLInputElement | null>(null);
   const isDrawingRef = useRef<boolean>(false);
   const isDraggingElementRef = useRef<{
     id: string;
@@ -142,6 +263,22 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     startY: number;
     origX: number;
     origY: number;
+    origControlPoints?: Array<{ x: number; y: number }>;
+  } | null>(null);
+  const isDraggingNodeRef = useRef<{
+    elementId: string;
+    nodeIndex: number;
+  } | null>(null);
+  const isResizingHandleRef = useRef<{
+    elementId: string;
+    handle: 'nw' | 'ne' | 'se' | 'sw' | 'n' | 'e' | 's' | 'w';
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+    origW: number;
+    origH: number;
+    origFontSize: number;
   } | null>(null);
   const penActiveTimestampRef = useRef<number>(0);
   const longPressTimerRef = useRef<number | null>(null);
@@ -149,22 +286,145 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
   const pinchDistanceRef = useRef<number | null>(null);
 
   const activePartner = partners.find((p) => p.id === selectedPartnerId) || null;
+  const selectedElement = elements.find((el) => el.id === selectedId) || null;
 
   const notify = (msg: string) => {
     setStatusNotice(msg);
-    setTimeout(() => setStatusNotice(null), 2800);
+    setTimeout(() => setStatusNotice(null), 3200);
   };
 
-  /**
-   * Carica in automatico gli asset grafici del Partner selezionato dal dropdown:
-   * - Aggiorna la Clipboard con Monogramma/Logo, Co-branding e Checkerboard del Partner
-   * - Inserisce/aggiorna il Badge Logo del Partner sul Canvas
-   * - Imposta il colore primario del Partner come colore attivo
-   */
+  // Registra eventuali font OTF/TTF personalizzati salvati in precedenza in localStorage
+  useEffect(() => {
+    (['Akena Otos', 'Montserrat'] as BuilderFontFamily[]).forEach((family) => {
+      try {
+        const stored = localStorage.getItem(CUSTOM_FONT_STORAGE_KEYS[family]);
+        if (stored) {
+          const parsed = JSON.parse(stored) as { fileName: string; dataUrl: string };
+          if (parsed?.dataUrl && typeof FontFace !== 'undefined') {
+            const faceNormal = new FontFace(family, `url(${parsed.dataUrl})`, {
+              weight: '100 900',
+              style: 'normal',
+            });
+            const faceItalic = new FontFace(family, `url(${parsed.dataUrl})`, {
+              weight: '100 900',
+              style: 'italic',
+            });
+            Promise.all([faceNormal.load(), faceItalic.load()])
+              .then(([loadedNormal, loadedItalic]) => {
+                document.fonts.add(loadedNormal);
+                document.fonts.add(loadedItalic);
+                setCustomLoadedFonts((prev) => ({ ...prev, [family]: parsed.fileName }));
+              })
+              .catch(() => {
+                // ignore invalid font blob
+              });
+          }
+        }
+      } catch {
+        // ignore storage errors
+      }
+    });
+  }, []);
+
+  // Quando l'utente seleziona un elemento testuale, sincronizza i controlli del pannello Carattere
+  useEffect(() => {
+    if (!selectedElement) return;
+    if (selectedElement.type === 'textured-text') {
+      const resolvedFamily: BuilderFontFamily =
+        selectedElement.fontFamily === 'Montserrat' || selectedElement.fontFamily === 'Akena Otos'
+          ? selectedElement.fontFamily
+          : selectedElement.fontStyle === 'editorial-serif'
+          ? 'Akena Otos'
+          : 'Montserrat';
+      setActiveFontFamily(resolvedFamily);
+      setActiveFontWeight((selectedElement.fontWeight as BuilderFontWeight) || 600);
+      setActiveFontItalic(Boolean(selectedElement.fontItalic));
+      setActiveFontSize(selectedElement.fontSize || 48);
+      setActiveLineHeight(selectedElement.lineHeight || 1.2);
+      setActiveLetterSpacing(selectedElement.letterSpacing ?? 0);
+      setActiveTextAlign(selectedElement.textAlign || 'center');
+      setActiveTextTransform(selectedElement.textTransform || 'none');
+    }
+  }, [selectedId]);
+
+  // Funzione helper per salvare nello stack Undo prima di una modifica
+  const commitElementsChange = (
+    updater: (prev: VectorElement[]) => VectorElement[]
+  ) => {
+    setElements((prev) => {
+      const next = updater(prev);
+      if (next !== prev) {
+        setHistoryPast((past) => [...past.slice(-39), prev]);
+        setHistoryFuture([]);
+      }
+      return next;
+    });
+  };
+
+  const handleUndo = () => {
+    if (historyPast.length === 0) return;
+    const previous = historyPast[historyPast.length - 1];
+    setHistoryPast((past) => past.slice(0, -1));
+    setHistoryFuture((future) => [elements, ...future.slice(0, 39)]);
+    setElements(previous);
+    notify('Annullato (Undo)');
+  };
+
+  const handleRedo = () => {
+    if (historyFuture.length === 0) return;
+    const next = historyFuture[0];
+    setHistoryFuture((future) => future.slice(1));
+    setHistoryPast((past) => [...past.slice(-39), elements]);
+    setElements(next);
+    notify('Ripristinato (Redo)');
+  };
+
+  // Caricamento file .otf / .ttf / .woff2 per Akena Otos o Montserrat
+  const handleCustomFontUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const targetFamily = activeFontFamily;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const dataUrl = String(reader.result || '');
+      if (!dataUrl || typeof FontFace === 'undefined') return;
+      try {
+        const faceNormal = new FontFace(targetFamily, `url(${dataUrl})`, {
+          weight: '100 900',
+          style: 'normal',
+        });
+        const faceItalic = new FontFace(targetFamily, `url(${dataUrl})`, {
+          weight: '100 900',
+          style: 'italic',
+        });
+        const [loadedNormal, loadedItalic] = await Promise.all([
+          faceNormal.load(),
+          faceItalic.load(),
+        ]);
+        document.fonts.add(loadedNormal);
+        document.fonts.add(loadedItalic);
+        setCustomLoadedFonts((prev) => ({ ...prev, [targetFamily]: file.name }));
+        try {
+          localStorage.setItem(
+            CUSTOM_FONT_STORAGE_KEYS[targetFamily],
+            JSON.stringify({ fileName: file.name, dataUrl })
+          );
+        } catch {
+          // Quota localStorage superata, il font resta comunque attivo nella sessione corrente
+        }
+        notify(`Font "${targetFamily}" (${file.name}) caricato e attivato su tutte le declinazioni!`);
+      } catch {
+        notify(`Impossibile leggere il file font ${file.name}. Usa un file .otf, .ttf o .woff2 valido.`);
+      }
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
   const handlePartnerDropdownChange = (partnerId: string) => {
     onSelectPartner(partnerId);
     if (!partnerId) {
-      notify('Nessun partner selezionato: ripristinata solo palette Fatti a mano');
+      notify('Nessun partner selezionato: ripristinata palette Fatti a mano');
       return;
     }
     const chosen = partners.find((p) => p.id === partnerId);
@@ -180,15 +440,13 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
       setActiveColor(chosen.palette[0]);
     }
 
-    // Sostituisce eventuali badge partner precedenti sul canvas e aggiunge quello del partner scelto
-    setElements((prev) => {
+    commitElementsChange((prev) => {
       const withoutOldPartnerBadge = prev.filter(
         (el) => !el.id.startsWith('partner-badge-')
       );
       return [...withoutOldPartnerBadge, partnerElements[0]];
     });
 
-    // Pre-carica in cima alla clipboard i 3 asset vettoriali del partner
     setClipboard((prev) => {
       const withoutOldPartnerClips = prev.filter(
         (el) => !el.id.startsWith('clip-partner-')
@@ -196,9 +454,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
       return [...partnerClipboard, ...withoutOldPartnerClips].slice(0, 8);
     });
 
-    notify(
-      `Caricato Brand Kit "${chosen.name}": Logo ${chosen.logoText}, Font ${chosen.fontStyle} e Palette ${chosen.palette.join(' ')}`
-    );
+    notify(`Caricato Brand Kit "${chosen.name}"`);
   };
 
   const handleInsertFullPartnerKitOnCanvas = () => {
@@ -208,46 +464,142 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
       canvasSize.width,
       canvasSize.height
     );
-    setElements((prev) => {
+    commitElementsChange((prev) => {
       const withoutOld = prev.filter(
-        (el) => !el.id.startsWith(`partner-badge-${activePartner.id}`) && !el.id.startsWith(`partner-blob-${activePartner.id}`)
+        (el) =>
+          !el.id.startsWith(`partner-badge-${activePartner.id}`) &&
+          !el.id.startsWith(`partner-blob-${activePartner.id}`)
       );
       return [...withoutOld, ...partnerElements];
     });
-    notify(`Inseriti Logo "${activePartner.logoText}" e Macchia Palette di ${activePartner.name} sul Canvas!`);
+    notify(`Inseriti Logo e Macchia Palette di ${activePartner.name}`);
   };
 
-  // Supporto scorciatoie da tastiera Ctrl+C / Ctrl+V / Backspace
+  // Finalizza il tracciato Penna (P)
+  const finishPenPath = (closed = true) => {
+    if (penDraftPoints.length < 2) {
+      setPenDraftPoints([]);
+      return;
+    }
+    const maxZ = elements.reduce((acc, el) => Math.max(acc, el.zIndex), 0);
+    const rebuilt = rebuildPathFromControlPoints(penDraftPoints, closed);
+    const newPenEl: VectorElement = {
+      id: `pen-${Date.now()}`,
+      name: closed ? 'Forma Penna Bézier Chiusa' : 'Tracciato Penna Aperto',
+      type: 'pen-path',
+      x: rebuilt.x,
+      y: rebuilt.y,
+      width: rebuilt.width,
+      height: rebuilt.height,
+      rotation: 0,
+      scale: 1,
+      color: closed ? activeColor : 'none',
+      strokeColor: activeStrokeColor !== 'none' ? activeStrokeColor : activeColor,
+      strokeWidth: activeStrokeWidth > 0 ? activeStrokeWidth : closed ? 0 : 4,
+      strokeDasharray: activeStrokeDash,
+      opacity: 0.96,
+      zIndex: maxZ + 1,
+      visible: true,
+      locked: false,
+      pathData: rebuilt.pathData,
+      controlPoints: penDraftPoints,
+      textureType: activeTexture,
+    };
+    commitElementsChange((prev) => [...prev, newPenEl]);
+    setSelectedId(newPenEl.id);
+    setPenDraftPoints([]);
+    notify('Tracciato Penna Bézier completato (modificabile coi nodi "A")');
+  };
+
+  // Scorciatoie da tastiera stile Adobe Illustrator (V, A, P, B, Shift+B, T, M, W, S, I, Ctrl+Z, Ctrl+C, Ctrl+V, Invio, Canc)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) {
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT')
+      ) {
         return;
       }
 
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
         if (selectedId) {
           const found = elements.find((el) => el.id === selectedId);
           if (found) {
             setClipboard((prev) => [{ ...found, id: `clip-${Date.now()}` }, ...prev.slice(0, 7)]);
-            notify(`Copiato "${found.name}" negli appunti vettoriali`);
+            notify(`Copiato "${found.name}" negli appunti`);
           }
         }
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') {
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') {
         if (clipboard.length > 0) {
           e.preventDefault();
           pasteFromClipboard(clipboard[0]);
         }
-      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        return;
+      }
+
+      if (e.key === 'Enter' && activeTool === 'pen' && penDraftPoints.length >= 2) {
+        e.preventDefault();
+        finishPenPath(true);
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        setPenDraftPoints([]);
+        setSelectedId(null);
+        setSelectedNodeIndex(null);
+        return;
+      }
+
+      if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedId) {
-          setElements((prev) => prev.filter((el) => el.id !== selectedId || el.locked));
+          commitElementsChange((prev) =>
+            prev.filter((el) => el.id !== selectedId || el.locked)
+          );
           setSelectedId(null);
+          setSelectedNodeIndex(null);
         }
+        return;
+      }
+
+      // Single-key Illustrator tool shortcuts
+      if (!e.metaKey && !e.ctrlKey && !e.altKey) {
+        const k = e.key.toLowerCase();
+        if (k === 'v') setActiveTool('select');
+        else if (k === 'a') setActiveTool('direct-select');
+        else if (k === 'p') setActiveTool('pen');
+        else if (k === 'b' && e.shiftKey) setActiveTool('blob');
+        else if (k === 'b' && !e.shiftKey) setActiveTool('brush');
+        else if (k === 't') {
+          setActiveTool('text-box');
+          setRightDockTab('character');
+        } else if (k === 'm') setActiveTool('shape');
+        else if (k === 'w') setActiveTool('checkerboard');
+        else if (k === 's') setActiveTool('stamp');
+        else if (k === 'i') setActiveTool('eyedropper');
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedId, elements, clipboard]);
+  }, [selectedId, elements, clipboard, activeTool, penDraftPoints, historyPast, historyFuture]);
 
   const toCanvasCoords = (clientX: number, clientY: number): { x: number; y: number } => {
     const svg = svgRef.current;
@@ -255,7 +607,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     const rect = svg.getBoundingClientRect();
     const x = ((clientX - rect.left) / rect.width) * canvasSize.width;
     const y = ((clientY - rect.top) / rect.height) * canvasSize.height;
-    return { x, y };
+    return { x: Math.round(x), y: Math.round(y) };
   };
 
   const pasteFromClipboard = (item: VectorElement) => {
@@ -269,13 +621,335 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
       zIndex: maxZ + 1,
       locked: false,
     };
-    setElements((prev) => [...prev, cloned]);
+    commitElementsChange((prev) => [...prev, cloned]);
     setSelectedId(cloned.id);
-    notify(`Incollato "${item.name}" mantenendo curve e colori originali`);
+    notify(`Incollato "${item.name}"`);
+  };
+
+  // Crea una nuova Casella di Testo con Montserrat o Akena Otos e la declinazione scelta
+  const createNewTextBoxAt = (x: number, y: number, boxWidth = 520) => {
+    const maxZ = elements.reduce((acc, el) => Math.max(acc, el.zIndex), 0);
+    const defaultText = 'Nuova Casella di Testo\nModifica con Montserrat o Akena Otos';
+    const wrapped = wrapPosterText(
+      defaultText,
+      Math.max(12, Math.floor(boxWidth / (activeFontSize * 0.55)))
+    );
+    const meta =
+      activeTexture !== 'none'
+        ? generateTextVectorBackdropPath(wrapped, x, y, activeFontSize, activeTexture)
+        : {
+            width: Math.max(260, boxWidth),
+            height: Math.max(110, Math.round(activeFontSize * activeLineHeight * 2.4)),
+            pathData: '',
+          };
+
+    const declLabel =
+      FONT_DECLINATIONS.find(
+        (d) => d.weight === activeFontWeight && d.italic === activeFontItalic
+      )?.label || `${activeFontWeight}`;
+
+    const newTextBox: VectorElement = {
+      id: `textbox-${Date.now()}`,
+      name: `Testo ${activeFontFamily} (${declLabel})`,
+      type: 'textured-text',
+      x,
+      y,
+      width: meta.width,
+      height: meta.height,
+      rotation: 0,
+      scale: 1,
+      color: activeColor,
+      secondaryColor: activePartner?.palette?.[1] || '#D4A373',
+      strokeColor: activeStrokeColor,
+      strokeWidth: activeStrokeWidth,
+      opacity: 1,
+      zIndex: maxZ + 1,
+      visible: true,
+      locked: false,
+      pathData: meta.pathData,
+      textureType: activeTexture,
+      textContent: defaultText,
+      fontStyle: activeFontFamily === 'Akena Otos' ? 'editorial-serif' : 'craft-rounded',
+      fontFamily: activeFontFamily,
+      fontWeight: activeFontWeight,
+      fontItalic: activeFontItalic,
+      fontSize: activeFontSize,
+      lineHeight: activeLineHeight,
+      letterSpacing: activeLetterSpacing,
+      textAlign: activeTextAlign,
+      textTransform: activeTextTransform,
+      textBoxWidth: boxWidth,
+    };
+
+    commitElementsChange((prev) => [...prev, newTextBox]);
+    setSelectedId(newTextBox.id);
+    setRightDockTab('character');
+    setActiveTool('select');
+    notify(`Aggiunta Casella di Testo in ${activeFontFamily} (${declLabel})`);
+  };
+
+  // Aggiorna una proprietà dell'elemento testuale selezionato e ricalcola eventuale fondino
+  const updateSelectedTextProperty = (patch: Partial<VectorElement>) => {
+    if (!selectedElement) return;
+    commitElementsChange((prev) =>
+      prev.map((el) => {
+        if (el.id !== selectedElement.id || el.locked) return el;
+        const merged: VectorElement = { ...el, ...patch };
+        const fSize = merged.fontSize || 48;
+        const lHeight = merged.lineHeight || 1.2;
+        const rawText = merged.textContent || 'Testo';
+        const boxW = merged.textBoxWidth || merged.width || 480;
+        const maxChars = Math.max(8, Math.floor(boxW / Math.max(10, fSize * 0.54)));
+        const wrapped = wrapPosterText(rawText, maxChars);
+        const linesCount = wrapped.split('\n').length;
+
+        if (merged.textureType === 'materic-blob' || merged.pathData) {
+          const meta = generateTextVectorBackdropPath(
+            wrapped,
+            merged.x,
+            merged.y,
+            fSize,
+            merged.textureType
+          );
+          return {
+            ...merged,
+            width: Math.max(boxW, meta.width),
+            height: Math.max(Math.round(linesCount * fSize * lHeight + 36), meta.height),
+            pathData: merged.textureType === 'none' ? '' : meta.pathData,
+          };
+        }
+
+        return {
+          ...merged,
+          width: Math.max(180, boxW),
+          height: Math.max(70, Math.round(linesCount * fSize * lHeight + 32)),
+        };
+      })
+    );
+  };
+
+  // Strumenti di Allineamento Illustrator (6 direzioni rispetto alla Tavola da Disegno)
+  const alignSelectedElement = (
+    mode: 'left' | 'center-h' | 'right' | 'top' | 'center-v' | 'bottom'
+  ) => {
+    if (!selectedElement || selectedElement.locked) return;
+    const halfW = selectedElement.width / 2;
+    const halfH = selectedElement.height / 2;
+    let targetX = selectedElement.x;
+    let targetY = selectedElement.y;
+
+    if (mode === 'left') targetX = Math.round(halfW + 40);
+    if (mode === 'center-h') targetX = Math.round(canvasSize.width / 2);
+    if (mode === 'right') targetX = Math.round(canvasSize.width - halfW - 40);
+    if (mode === 'top') targetY = Math.round(halfH + 40);
+    if (mode === 'center-v') targetY = Math.round(canvasSize.height / 2);
+    if (mode === 'bottom') targetY = Math.round(canvasSize.height - halfH - 40);
+
+    const dx = targetX - selectedElement.x;
+    const dy = targetY - selectedElement.y;
+
+    commitElementsChange((prev) =>
+      prev.map((el) => {
+        if (el.id !== selectedElement.id) return el;
+        return translateVectorElement(el, dx, dy);
+      })
+    );
+  };
+
+  // Pathfinder: Unisci Tracciato Selezionato col livello sottostante (Unite / Compound Path)
+  const handlePathfinderUnite = () => {
+    if (!selectedElement) return;
+    const sorted = [...elements].sort((a, b) => a.zIndex - b.zIndex);
+    const idx = sorted.findIndex((el) => el.id === selectedElement.id);
+    if (idx <= 0) {
+      notify('Seleziona un livello sopra un altro tracciato per unirli con Pathfinder');
+      return;
+    }
+    const targetBelow = sorted[idx - 1];
+    if (!targetBelow.pathData || !selectedElement.pathData) {
+      notify('Entrambi i livelli devono avere un tracciato vettoriale per essere uniti');
+      return;
+    }
+
+    const minX = Math.min(
+      selectedElement.x - selectedElement.width / 2,
+      targetBelow.x - targetBelow.width / 2
+    );
+    const maxX = Math.max(
+      selectedElement.x + selectedElement.width / 2,
+      targetBelow.x + targetBelow.width / 2
+    );
+    const minY = Math.min(
+      selectedElement.y - selectedElement.height / 2,
+      targetBelow.y - targetBelow.height / 2
+    );
+    const maxY = Math.max(
+      selectedElement.y + selectedElement.height / 2,
+      targetBelow.y + targetBelow.height / 2
+    );
+
+    const mergedControlPoints = [
+      ...(targetBelow.controlPoints || []),
+      ...(selectedElement.controlPoints || []),
+    ].slice(0, 36);
+
+    const unitedElement: VectorElement = {
+      ...targetBelow,
+      id: `united-${Date.now()}`,
+      name: `Unione: ${targetBelow.name} + ${selectedElement.name}`,
+      type: 'blob',
+      x: Math.round((minX + maxX) / 2),
+      y: Math.round((minY + maxY) / 2),
+      width: Math.round(maxX - minX),
+      height: Math.round(maxY - minY),
+      color: selectedElement.color,
+      pathData: `${targetBelow.pathData} ${selectedElement.pathData}`,
+      controlPoints: mergedControlPoints,
+    };
+
+    commitElementsChange((prev) =>
+      prev
+        .filter((el) => el.id !== selectedElement.id && el.id !== targetBelow.id)
+        .concat(unitedElement)
+    );
+    setSelectedId(unitedElement.id);
+    notify('Pathfinder: Tracciati uniti in una forma composta!');
+  };
+
+  // Converte qualsiasi forma selezionata in una Macchia Organica modificabile coi nodi (A)
+  const handleConvertSelectedToOrganicBlob = () => {
+    if (!selectedElement || selectedElement.locked) return;
+    const rx = Math.max(40, selectedElement.width / 2);
+    const ry = Math.max(40, selectedElement.height / 2);
+    const lobes = 10;
+    const pts: Array<{ x: number; y: number }> = [];
+    for (let i = 0; i < lobes; i++) {
+      const angle = (i / lobes) * Math.PI * 2;
+      const factor = 1 + Math.sin(angle * 2 + i) * 0.16;
+      pts.push({
+        x: Math.round(selectedElement.x + Math.cos(angle) * rx * factor),
+        y: Math.round(selectedElement.y + Math.sin(angle) * ry * factor),
+      });
+    }
+    const rebuilt = rebuildPathFromControlPoints(pts, true);
+    commitElementsChange((prev) =>
+      prev.map((el) =>
+        el.id === selectedElement.id
+          ? {
+              ...el,
+              type: 'blob',
+              pathData: rebuilt.pathData,
+              controlPoints: pts,
+            }
+          : el
+      )
+    );
+    setActiveTool('direct-select');
+    notify('Convertito in Macchia Blob con 10 nodi di controllo (trascinali con Selezione Diretta A)');
+  };
+
+  // Trasla qualsiasi elemento vettoriale mantenendo sincronizzati controlPoints e pathData
+  const translateVectorElement = (el: VectorElement, dx: number, dy: number): VectorElement => {
+    const nextX = Math.round(el.x + dx);
+    const nextY = Math.round(el.y + dy);
+
+    if (el.controlPoints && el.controlPoints.length >= 3) {
+      const movedPts = el.controlPoints.map((pt) => ({
+        x: Math.round(pt.x + dx),
+        y: Math.round(pt.y + dy),
+      }));
+      if (el.type === 'shape' && el.shapeKind) {
+        const shapeData = generateShapePrimitivePath(
+          el.shapeKind,
+          nextX,
+          nextY,
+          el.width,
+          el.height,
+          el.cornerRadius || 0
+        );
+        return {
+          ...el,
+          x: nextX,
+          y: nextY,
+          pathData: shapeData.pathData,
+          controlPoints: shapeData.controlPoints,
+        };
+      }
+      const rebuilt = rebuildPathFromControlPoints(movedPts, true);
+      return {
+        ...el,
+        x: nextX,
+        y: nextY,
+        pathData: rebuilt.pathData,
+        controlPoints: movedPts,
+      };
+    }
+
+    if (el.type === 'stamp' && el.stampKind) {
+      const updatedStamp = generateBrandStamp(el.stampKind, nextX, nextY, el.width);
+      return {
+        ...el,
+        x: nextX,
+        y: nextY,
+        pathData: updatedStamp.pathData,
+        subPaths: updatedStamp.subPaths,
+      };
+    }
+
+    if (el.type === 'blob') {
+      return {
+        ...el,
+        x: nextX,
+        y: nextY,
+        pathData: generateOrganicBlobPath(nextX, nextY, el.width / 2, el.height / 2, 2.5),
+      };
+    }
+
+    if (el.type === 'checkerboard') {
+      return {
+        ...el,
+        x: nextX,
+        y: nextY,
+        pathData: generateWavyCheckerboardPath(
+          nextX - el.width / 2,
+          nextY - el.height / 2,
+          el.width,
+          el.height,
+          5,
+          6,
+          12,
+          2.1
+        ),
+      };
+    }
+
+    if (el.type === 'textured-text' && !el.isHandDrawnText) {
+      if (!el.pathData && el.textureType !== 'materic-blob') {
+        return { ...el, x: nextX, y: nextY };
+      }
+      const meta = generateTextVectorBackdropPath(
+        el.textContent || 'Fatti a mano',
+        nextX,
+        nextY,
+        el.fontSize || 64,
+        el.textureType
+      );
+      return {
+        ...el,
+        x: nextX,
+        y: nextY,
+        pathData: meta.pathData,
+      };
+    }
+
+    return {
+      ...el,
+      x: nextX,
+      y: nextY,
+    };
   };
 
   const handleCanvasPointerDown = (e: React.PointerEvent<SVGSVGElement>) => {
-    // Gestione Pinch-to-Zoom a due dita su iPad
     if (e.pointerType === 'touch') {
       activeTouchesRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (activeTouchesRef.current.size === 2) {
@@ -284,7 +958,6 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
         isDrawingRef.current = false;
         return;
       }
-      // Palm-rejection naturale: se Apple Pencil è stata usata negli ultimi 800ms, ignora il palmo
       if (performance.now() - penActiveTimestampRef.current < 800) {
         setPointerModeLabel('Palm Rejection attivo (Apple Pencil prioritaria)');
         return;
@@ -293,25 +966,42 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
 
     if (e.pointerType === 'pen') {
       penActiveTimestampRef.current = performance.now();
-      setPointerModeLabel(
-        `Apple Pencil · Pressione ${(e.pressure * 100).toFixed(0)}%`
-      );
+      setPointerModeLabel(`Apple Pencil · Pressione ${(e.pressure * 100).toFixed(0)}%`);
     } else if (e.pointerType === 'mouse') {
-      setPointerModeLabel('Trackpad / Mouse · Dinamica Velocity-to-Width');
+      setPointerModeLabel('Cursore Precisione Illustrator · Bezier & Freeform Blob');
     } else {
-      setPointerModeLabel('Touch su iPad · Gesture & Disegno');
+      setPointerModeLabel('Touch iPad · Gesture & Disegno');
     }
 
     const coords = toCanvasCoords(e.clientX, e.clientY);
+    setCursorCoords(coords);
 
-    if (activeTool === 'select') {
+    if (activeTool === 'select' || activeTool === 'direct-select') {
       if (e.target === svgRef.current || (e.target as SVGElement).dataset.bg === 'true') {
         setSelectedId(null);
+        setSelectedNodeIndex(null);
       }
       return;
     }
 
-    e.currentTarget.setPointerCapture(e.pointerId);
+    // Strumento Penna Vettoriale (P): aggiunge un punto di ancoraggio ad ogni clic
+    if (activeTool === 'pen') {
+      if (
+        penDraftPoints.length >= 3 &&
+        Math.hypot(coords.x - penDraftPoints[0].x, coords.y - penDraftPoints[0].y) < 28
+      ) {
+        finishPenPath(true);
+        return;
+      }
+      setPenDraftPoints((prev) => [...prev, coords]);
+      return;
+    }
+
+    // Strumento Casella di Testo (T) con Montserrat / Akena Otos
+    if (activeTool === 'text-box' || activeTool === 'textured-text') {
+      createNewTextBoxAt(coords.x, coords.y, 520);
+      return;
+    }
 
     if (activeTool === 'stamp') {
       const maxZ = elements.reduce((acc, el) => Math.max(acc, el.zIndex), 0);
@@ -337,55 +1027,27 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
         textContent: stampData.defaultText,
         textureType: activeTexture,
       };
-      setElements((prev) => [...prev, newStamp]);
+      commitElementsChange((prev) => [...prev, newStamp]);
       setSelectedId(newStamp.id);
       return;
     }
 
-    if (activeTool === 'textured-text') {
-      const maxZ = elements.reduce((acc, el) => Math.max(acc, el.zIndex), 0);
-      const sampleText = activePartner ? `${activePartner.logoText} · Fatti a mano` : 'Fatti a mano';
-      const meta = generateTextVectorBackdropPath(sampleText, coords.x, coords.y, 64, activeTexture);
-      const newText: VectorElement = {
-        id: `text-${Date.now()}`,
-        name: 'Testo Vettoriale Brand',
-        type: 'textured-text',
-        x: coords.x,
-        y: coords.y,
-        width: meta.width,
-        height: meta.height,
-        rotation: 0,
-        scale: 1,
-        color: activeColor,
-        secondaryColor: activePartner?.palette?.[1] || '#D4A373',
-        opacity: 1,
-        zIndex: maxZ + 1,
-        visible: true,
-        locked: false,
-        pathData: meta.pathData,
-        textureType: activeTexture,
-        textContent: sampleText,
-        fontStyle: activePartner?.fontStyle || 'editorial-serif',
-        fontSize: 64,
-      };
-      setElements((prev) => [...prev, newText]);
-      setSelectedId(newText.id);
-      setActiveTool('select');
-      return;
-    }
+    e.currentTarget.setPointerCapture(e.pointerId);
 
-    if (activeTool === 'blob' || activeTool === 'checkerboard') {
+    // Forme Geometriche (M) o Wavy Checkerboard (W) usano drag di dimensionamento
+    if (activeTool === 'shape' || activeTool === 'checkerboard') {
       isDrawingRef.current = true;
       setDragBox({
         startX: coords.x,
         startY: coords.y,
-        currentX: coords.x + 10,
-        currentY: coords.y + 10,
+        currentX: coords.x + 12,
+        currentY: coords.y + 12,
       });
       return;
     }
 
-    // Pennello Fluido (Brush)
+    // MACCHIA BLOB COL CURSORE (Shift+B) E PENNELLO FLUIDO (B):
+    // Entrambi tracciano liberamente col movimento del cursore senza vincolo di rettangolo!
     isDrawingRef.current = true;
     const pointerType =
       e.pointerType === 'pen' || e.pointerType === 'touch' ? e.pointerType : 'mouse';
@@ -415,88 +1077,125 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
         const pts = Array.from(activeTouchesRef.current.values());
         const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
         const ratio = dist / pinchDistanceRef.current;
-        setZoom((z) => Math.min(1.4, Math.max(0.25, z * ratio)));
+        setZoom((z) => Math.min(1.5, Math.max(0.25, z * ratio)));
         pinchDistanceRef.current = dist;
         return;
       }
     }
 
     const coords = toCanvasCoords(e.clientX, e.clientY);
+    setCursorCoords(coords);
 
-    // Trascinamento elemento selezionato
-    if (isDraggingElementRef.current) {
-      const drag = isDraggingElementRef.current;
-      const dx = coords.x - drag.startX;
-      const dy = coords.y - drag.startY;
+    // 1. Trascinamento di un singolo Nodo Vettoriale con Selezione Diretta (A)
+    if (isDraggingNodeRef.current) {
+      const { elementId, nodeIndex } = isDraggingNodeRef.current;
       setElements((prev) =>
         prev.map((el) => {
-          if (el.id !== drag.id || el.locked) return el;
-          if (el.type === 'stamp' && el.stampKind) {
-            const updatedStamp = generateBrandStamp(
-              el.stampKind,
-              drag.origX + dx,
-              drag.origY + dy,
-              el.width
+          if (el.id !== elementId || el.locked || !el.controlPoints) return el;
+          const nextPts = el.controlPoints.map((pt, idx) =>
+            idx === nodeIndex ? { x: coords.x, y: coords.y } : pt
+          );
+          const rebuilt = rebuildPathFromControlPoints(nextPts, true);
+          return {
+            ...el,
+            x: rebuilt.x,
+            y: rebuilt.y,
+            width: rebuilt.width,
+            height: rebuilt.height,
+            pathData: rebuilt.pathData,
+            controlPoints: nextPts,
+          };
+        })
+      );
+      return;
+    }
+
+    // 2. Ridimensionamento tramite le 8 maniglie del Bounding Box Illustrator
+    if (isResizingHandleRef.current) {
+      const resize = isResizingHandleRef.current;
+      const dx = coords.x - resize.startX;
+      const dy = coords.y - resize.startY;
+      const scaleFactorX =
+        resize.handle.includes('e')
+          ? (resize.origW + dx * 2) / Math.max(20, resize.origW)
+          : resize.handle.includes('w')
+          ? (resize.origW - dx * 2) / Math.max(20, resize.origW)
+          : 1;
+      const scaleFactorY =
+        resize.handle.includes('s')
+          ? (resize.origH + dy * 2) / Math.max(20, resize.origH)
+          : resize.handle.includes('n')
+          ? (resize.origH - dy * 2) / Math.max(20, resize.origH)
+          : 1;
+
+      const clampedScaleX = Math.max(0.25, Math.min(4, scaleFactorX));
+      const clampedScaleY = Math.max(0.25, Math.min(4, scaleFactorY));
+      const newW = Math.max(40, Math.round(resize.origW * clampedScaleX));
+      const newH = Math.max(40, Math.round(resize.origH * clampedScaleY));
+
+      setElements((prev) =>
+        prev.map((el) => {
+          if (el.id !== resize.elementId || el.locked) return el;
+          if (el.controlPoints && el.controlPoints.length >= 3) {
+            const scaledPts = el.controlPoints.map((pt) => ({
+              x: Math.round(el.x + (pt.x - el.x) * (newW / Math.max(20, el.width))),
+              y: Math.round(el.y + (pt.y - el.y) * (newH / Math.max(20, el.height))),
+            }));
+            const rebuilt = rebuildPathFromControlPoints(scaledPts, true);
+            return {
+              ...el,
+              width: newW,
+              height: newH,
+              pathData: rebuilt.pathData,
+              controlPoints: scaledPts,
+            };
+          }
+          if (el.type === 'textured-text') {
+            const nextFontSize = Math.max(
+              14,
+              Math.min(180, Math.round(resize.origFontSize * ((clampedScaleX + clampedScaleY) / 2)))
             );
             return {
               ...el,
-              x: drag.origX + dx,
-              y: drag.origY + dy,
-              pathData: updatedStamp.pathData,
-              subPaths: updatedStamp.subPaths,
+              width: newW,
+              height: newH,
+              textBoxWidth: newW,
+              fontSize: nextFontSize,
             };
           }
           if (el.type === 'blob') {
             return {
               ...el,
-              x: drag.origX + dx,
-              y: drag.origY + dy,
-              pathData: generateOrganicBlobPath(
-                drag.origX + dx,
-                drag.origY + dy,
-                el.width / 2,
-                el.height / 2,
-                2.5
-              ),
+              width: newW,
+              height: newH,
+              pathData: generateOrganicBlobPath(el.x, el.y, newW / 2, newH / 2, 2.5),
             };
           }
-          if (el.type === 'checkerboard') {
-            return {
-              ...el,
-              x: drag.origX + dx,
-              y: drag.origY + dy,
-              pathData: generateWavyCheckerboardPath(
-                drag.origX + dx - el.width / 2,
-                drag.origY + dy - el.height / 2,
-                el.width,
-                el.height,
-                5,
-                6,
-                12,
-                2.1
-              ),
-            };
-          }
-          if (el.type === 'textured-text' && !el.isHandDrawnText) {
-            const meta = generateTextVectorBackdropPath(
-              el.textContent || 'Fatti a mano',
-              drag.origX + dx,
-              drag.origY + dy,
-              el.fontSize || 64,
-              el.textureType
-            );
-            return {
-              ...el,
-              x: drag.origX + dx,
-              y: drag.origY + dy,
-              pathData: meta.pathData,
-            };
-          }
-          return {
+          return { ...el, width: newW, height: newH };
+        })
+      );
+      return;
+    }
+
+    // 3. Trascinamento dell'intero elemento selezionato
+    if (isDraggingElementRef.current) {
+      const drag = isDraggingElementRef.current;
+      const dx = coords.x - drag.startX;
+      const dy = coords.y - drag.startY;
+      if (Math.hypot(dx, dy) > 4 && longPressTimerRef.current) {
+        window.clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+      }
+      setElements((prev) =>
+        prev.map((el) => {
+          if (el.id !== drag.id || el.locked) return el;
+          const baseEl: VectorElement = {
             ...el,
-            x: drag.origX + dx,
-            y: drag.origY + dy,
+            x: drag.origX,
+            y: drag.origY,
+            controlPoints: drag.origControlPoints || el.controlPoints,
           };
+          return translateVectorElement(baseEl, dx, dy);
         })
       );
       return;
@@ -504,14 +1203,14 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
 
     if (!isDrawingRef.current) return;
 
-    if (activeTool === 'blob' || activeTool === 'checkerboard') {
+    if (activeTool === 'shape' || activeTool === 'checkerboard') {
       setDragBox((prev) =>
         prev ? { ...prev, currentX: coords.x, currentY: coords.y } : null
       );
       return;
     }
 
-    if (activeTool === 'brush') {
+    if (activeTool === 'blob' || activeTool === 'brush') {
       const pointerType =
         e.pointerType === 'pen' || e.pointerType === 'touch' ? e.pointerType : 'mouse';
       setLiveSamples((prev) => {
@@ -524,11 +1223,6 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
           pointerType,
         });
         setLivePressure(pressure);
-        if (pointerType === 'pen') {
-          setPointerModeLabel(
-            `Apple Pencil · Pressione ${(pressure * 100).toFixed(0)}%`
-          );
-        }
         return [
           ...prev,
           {
@@ -553,6 +1247,14 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
       longPressTimerRef.current = null;
     }
 
+    if (isDraggingNodeRef.current) {
+      isDraggingNodeRef.current = null;
+      return;
+    }
+    if (isResizingHandleRef.current) {
+      isResizingHandleRef.current = null;
+      return;
+    }
     if (isDraggingElementRef.current) {
       isDraggingElementRef.current = null;
       return;
@@ -563,20 +1265,30 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
 
     const maxZ = elements.reduce((acc, el) => Math.max(acc, el.zIndex), 0);
 
-    if ((activeTool === 'blob' || activeTool === 'checkerboard') && dragBox) {
+    // Creazione Forme Geometriche (M) o Wavy Checkerboard (W)
+    if ((activeTool === 'shape' || activeTool === 'checkerboard') && dragBox) {
       const minX = Math.min(dragBox.startX, dragBox.currentX);
       const minY = Math.min(dragBox.startY, dragBox.currentY);
-      const w = Math.max(140, Math.abs(dragBox.currentX - dragBox.startX));
-      const h = Math.max(110, Math.abs(dragBox.currentY - dragBox.startY));
-      const cx = minX + w / 2;
-      const cy = minY + h / 2;
+      const w = Math.max(90, Math.abs(dragBox.currentX - dragBox.startX));
+      const h = Math.max(90, Math.abs(dragBox.currentY - dragBox.startY));
+      const cx = Math.round(minX + w / 2);
+      const cy = Math.round(minY + h / 2);
 
-      if (activeTool === 'blob') {
-        const pathData = generateOrganicBlobPath(cx, cy, w / 2, h / 2, Date.now() % 10, 10);
-        const newBlob: VectorElement = {
-          id: `blob-${Date.now()}`,
-          name: 'Macchia Organica (Auto-Blob)',
-          type: 'blob',
+      if (activeTool === 'shape') {
+        const shapeData = generateShapePrimitivePath(
+          activeShapeKind,
+          cx,
+          cy,
+          w,
+          h,
+          activeCornerRadius
+        );
+        const newShape: VectorElement = {
+          id: `shape-${Date.now()}`,
+          name: `Forma ${activeShapeKind.toUpperCase()}`,
+          type: 'shape',
+          shapeKind: activeShapeKind,
+          cornerRadius: activeCornerRadius,
           x: cx,
           y: cy,
           width: w,
@@ -584,15 +1296,19 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
           rotation: 0,
           scale: 1,
           color: activeColor,
-          opacity: 0.92,
+          strokeColor: activeStrokeColor,
+          strokeWidth: activeStrokeWidth,
+          strokeDasharray: activeStrokeDash,
+          opacity: 0.95,
           zIndex: maxZ + 1,
           visible: true,
           locked: false,
-          pathData,
+          pathData: shapeData.pathData,
+          controlPoints: shapeData.controlPoints,
           textureType: activeTexture,
         };
-        setElements((prev) => [...prev, newBlob]);
-        setSelectedId(newBlob.id);
+        commitElementsChange((prev) => [...prev, newShape]);
+        setSelectedId(newShape.id);
       } else {
         const pathData = generateWavyCheckerboardPath(minX, minY, w, h, 5, 6, 13, Date.now() % 7);
         const newCheck: VectorElement = {
@@ -613,13 +1329,117 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
           pathData,
           textureType: activeTexture,
         };
-        setElements((prev) => [...prev, newCheck]);
+        commitElementsChange((prev) => [...prev, newCheck]);
         setSelectedId(newCheck.id);
       }
       setDragBox(null);
       return;
     }
 
+    // Creazione MACCHIA BLOB COL CURSORE (Nessun vincolo di rettangolo!)
+    if (activeTool === 'blob' && liveSamples.length > 0) {
+      const freeformBlob = generateFreeformCursorBlobPath(
+        liveSamples,
+        blobMode,
+        Math.max(36, brushSize * 1.8),
+        blobRoughness
+      );
+
+      if (freeformBlob.pathData) {
+        // Se siamo in modalità 'blob-brush-merge' (Pennello Blob Unione) e c'è una macchia dello stesso colore che si sovrappone, fondila!
+        if (blobMode === 'blob-brush-merge' && mergeBlobBrushWithSameColor) {
+          const targetBlob = [...elements]
+            .reverse()
+            .find(
+              (el) =>
+                el.type === 'blob' &&
+                !el.locked &&
+                el.visible &&
+                el.color.toLowerCase() === activeColor.toLowerCase() &&
+                Math.abs(el.x - freeformBlob.x) < (el.width + freeformBlob.width) * 0.55 &&
+                Math.abs(el.y - freeformBlob.y) < (el.height + freeformBlob.height) * 0.55
+            );
+
+          if (targetBlob) {
+            const minX = Math.min(
+              targetBlob.x - targetBlob.width / 2,
+              freeformBlob.x - freeformBlob.width / 2
+            );
+            const maxX = Math.max(
+              targetBlob.x + targetBlob.width / 2,
+              freeformBlob.x + freeformBlob.width / 2
+            );
+            const minY = Math.min(
+              targetBlob.y - targetBlob.height / 2,
+              freeformBlob.y - freeformBlob.height / 2
+            );
+            const maxY = Math.max(
+              targetBlob.y + targetBlob.height / 2,
+              freeformBlob.y + freeformBlob.height / 2
+            );
+            const mergedPts = [
+              ...(targetBlob.controlPoints || []),
+              ...freeformBlob.controlPoints,
+            ].slice(0, 36);
+
+            commitElementsChange((prev) =>
+              prev.map((el) =>
+                el.id === targetBlob.id
+                  ? {
+                      ...el,
+                      x: Math.round((minX + maxX) / 2),
+                      y: Math.round((minY + maxY) / 2),
+                      width: Math.round(maxX - minX),
+                      height: Math.round(maxY - minY),
+                      pathData: `${el.pathData} ${freeformBlob.pathData}`,
+                      controlPoints: mergedPts,
+                    }
+                  : el
+              )
+            );
+            setSelectedId(targetBlob.id);
+            setLiveSamples([]);
+            notify('Pennello Blob: macchia fusa con la forma adiacente dello stesso colore!');
+            return;
+          }
+        }
+
+        const newBlob: VectorElement = {
+          id: `blob-${Date.now()}`,
+          name:
+            blobMode === 'freeform-lasso'
+              ? 'Macchia Lazo Libera'
+              : 'Macchia Pennello Blob',
+          type: 'blob',
+          x: freeformBlob.x,
+          y: freeformBlob.y,
+          width: freeformBlob.width,
+          height: freeformBlob.height,
+          rotation: 0,
+          scale: 1,
+          color: activeColor,
+          strokeColor: activeStrokeColor,
+          strokeWidth: activeStrokeWidth,
+          strokeDasharray: activeStrokeDash,
+          opacity: 0.94,
+          zIndex: maxZ + 1,
+          visible: true,
+          locked: false,
+          pathData: freeformBlob.pathData,
+          controlPoints: freeformBlob.controlPoints,
+          textureType: activeTexture,
+        };
+        commitElementsChange((prev) => [...prev, newBlob]);
+        setSelectedId(newBlob.id);
+        notify(
+          `Macchia Blob disegnata col cursore (${freeformBlob.controlPoints.length} nodi modificabili con "A")`
+        );
+      }
+      setLiveSamples([]);
+      return;
+    }
+
+    // Creazione Pennellata Calligrafica Fluida (B)
     if (activeTool === 'brush' && liveSamples.length > 1) {
       const { pathData, avgPressure, isPenInput } = generateSmoothedBrushPath(
         liveSamples,
@@ -636,15 +1456,17 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
 
         const newStroke: VectorElement = {
           id: `stroke-${Date.now()}`,
-          name: isPenInput ? 'Pennellata Apple Pencil' : 'Pennellata Fluida',
+          name: isPenInput ? 'Pennellata Apple Pencil' : 'Pennellata Calligrafica',
           type: 'freehand',
-          x: (minX + maxX) / 2,
-          y: (minY + maxY) / 2,
-          width: Math.max(40, maxX - minX),
-          height: Math.max(40, maxY - minY),
+          x: Math.round((minX + maxX) / 2),
+          y: Math.round((minY + maxY) / 2),
+          width: Math.max(40, Math.round(maxX - minX)),
+          height: Math.max(40, Math.round(maxY - minY)),
           rotation: 0,
           scale: 1,
           color: activeColor,
+          strokeColor: activeStrokeColor,
+          strokeWidth: activeStrokeWidth,
           opacity: isPenInput ? Math.min(1, Math.max(0.55, avgPressure * 1.15)) : 0.95,
           zIndex: maxZ + 1,
           visible: true,
@@ -652,7 +1474,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
           pathData,
           textureType: activeTexture,
         };
-        setElements((prev) => [...prev, newStroke]);
+        commitElementsChange((prev) => [...prev, newStroke]);
         setSelectedId(newStroke.id);
       }
       setLiveSamples([]);
@@ -663,22 +1485,65 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     e: React.PointerEvent<SVGGElement>,
     el: VectorElement
   ) => {
-    if (activeTool !== 'select') return;
+    // Strumento Contagocce (I): campiona colore, traccia e font dall'elemento cliccato
+    if (activeTool === 'eyedropper') {
+      e.stopPropagation();
+      if (el.color && el.color !== 'none') {
+        setActiveColor(el.color as BrandColorHex);
+      }
+      if (el.strokeColor) setActiveStrokeColor(el.strokeColor);
+      if (typeof el.strokeWidth === 'number') setActiveStrokeWidth(el.strokeWidth);
+      if (el.fontFamily) setActiveFontFamily(el.fontFamily);
+      if (el.fontWeight) setActiveFontWeight(el.fontWeight);
+      if (typeof el.fontItalic === 'boolean') setActiveFontItalic(el.fontItalic);
+      notify(`Campionato stile da "${el.name}" (${el.color})`);
+      setActiveTool('select');
+      return;
+    }
+
+    if (activeTool !== 'select' && activeTool !== 'direct-select') return;
     e.stopPropagation();
     setSelectedId(el.id);
+    setSelectedNodeIndex(null);
+
+    if (el.type === 'textured-text') {
+      setRightDockTab('character');
+    }
+
+    if (activeTool === 'direct-select') {
+      // Se l'elemento selezionato con 'A' non ha ancora controlPoints ed è un blob, generiamoli automaticamente
+      if (!el.controlPoints || el.controlPoints.length === 0) {
+        const rx = Math.max(36, el.width / 2);
+        const ry = Math.max(36, el.height / 2);
+        const pts: Array<{ x: number; y: number }> = [];
+        for (let i = 0; i < 8; i++) {
+          const a = (i / 8) * Math.PI * 2;
+          pts.push({
+            x: Math.round(el.x + Math.cos(a) * rx),
+            y: Math.round(el.y + Math.sin(a) * ry),
+          });
+        }
+        setElements((prev) =>
+          prev.map((item) => (item.id === el.id ? { ...item, controlPoints: pts } : item))
+        );
+      }
+      return;
+    }
 
     const coords = toCanvasCoords(e.clientX, e.clientY);
     if (!el.locked) {
+      setHistoryPast((past) => [...past.slice(-39), elements]);
+      setHistoryFuture([]);
       isDraggingElementRef.current = {
         id: el.id,
         startX: coords.x,
         startY: coords.y,
         origX: el.x,
         origY: el.y,
+        origControlPoints: el.controlPoints ? [...el.controlPoints] : undefined,
       };
     }
 
-    // Long-press (550ms) su iPad per Copia-Incolla rapido dell'elemento vettoriale
     if (longPressTimerRef.current) {
       window.clearTimeout(longPressTimerRef.current);
     }
@@ -686,14 +1551,13 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
       setClipboard((prev) => [{ ...el, id: `clip-${Date.now()}` }, ...prev.slice(0, 7)]);
       pasteFromClipboard(el);
       isDraggingElementRef.current = null;
-    }, 600);
+    }, 650);
   };
 
   const sortedElements = [...elements].sort((a, b) => a.zIndex - b.zIndex);
-  const selectedElement = elements.find((el) => el.id === selectedId) || null;
 
   const moveLayerZIndex = (id: string, direction: 'up' | 'down') => {
-    setElements((prev) => {
+    commitElementsChange((prev) => {
       const sorted = [...prev].sort((a, b) => a.zIndex - b.zIndex);
       const idx = sorted.findIndex((el) => el.id === id);
       if (idx === -1) return prev;
@@ -707,28 +1571,164 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     });
   };
 
-  const liveBrushPreviewPath =
-    liveSamples.length > 1 ? generateSmoothedBrushPath(liveSamples, brushSize, 1).pathData : '';
+  // Anteprima live durante il disegno a mano libera (sia per Pennello che per Macchia Blob col cursore!)
+  const livePreviewData = React.useMemo(() => {
+    if (liveSamples.length < 2) return null;
+    if (activeTool === 'blob') {
+      const blobRes = generateFreeformCursorBlobPath(
+        liveSamples,
+        blobMode,
+        Math.max(36, brushSize * 1.8),
+        blobRoughness
+      );
+      return {
+        pathData: blobRes.pathData,
+        controlPoints: blobRes.controlPoints,
+        isBlob: true,
+      };
+    }
+    if (activeTool === 'brush') {
+      return {
+        pathData: generateSmoothedBrushPath(liveSamples, brushSize, 1).pathData,
+        controlPoints: [],
+        isBlob: false,
+      };
+    }
+    return null;
+  }, [liveSamples, activeTool, blobMode, brushSize, blobRoughness]);
 
-  const getFontFamilyCss = (style?: string) => {
-    if (style === 'craft-rounded') return '"Bricolage Grotesque", sans-serif';
-    if (style === 'mono-label') return '"JetBrains Mono", monospace';
-    return '"Fraunces", Georgia, serif';
+  const getElementFontCss = (el: VectorElement): string => {
+    if (el.fontFamily === 'Montserrat') {
+      return '"Montserrat", sans-serif';
+    }
+    if (el.fontFamily === 'Akena Otos') {
+      return '"Akena Otos", "Fraunces", "Cormorant Garamond", Georgia, serif';
+    }
+    if (el.fontStyle === 'craft-rounded') return '"Montserrat", "Bricolage Grotesque", sans-serif';
+    if (el.fontStyle === 'mono-label') return '"Montserrat", "JetBrains Mono", monospace';
+    return '"Akena Otos", "Fraunces", Georgia, serif';
   };
 
+  const formatElementTextLine = (line: string, transform?: 'none' | 'uppercase' | 'lowercase') => {
+    if (transform === 'uppercase') return line.toUpperCase();
+    if (transform === 'lowercase') return line.toLowerCase();
+    return line;
+  };
+
+  // Classi dinamiche per Tema Scuro Adobe Illustrator Pro vs Tema Beige Kraft Studio
+  const isDark = workspaceTheme === 'adobe-dark';
+  const shellBg = isDark
+    ? 'bg-[#1E1E1E] text-[#E6E6E6] border-[#333337]'
+    : 'bg-[#F4ECE1] text-[#1A2B4C] border-[#1A2B4C]/20';
+  const panelBg = isDark
+    ? 'bg-[#252526] text-[#E6E6E6] border-[#38383D]'
+    : 'bg-[#F4ECE1] text-[#1A2B4C] border-[#1A2B4C]/15';
+  const inputBg = isDark
+    ? 'bg-[#18181A] text-[#F0F0F0] border-[#3E3E44]'
+    : 'bg-[#EADDCD] text-[#1A2B4C] border-[#1A2B4C]/20';
+  const mutedText = isDark ? 'text-[#9DA0A6]' : 'text-[#1A2B4C]/65';
+  const artboardSurroundBg = isDark ? 'bg-[#141416]' : 'bg-[#1A2B4C]/10';
+
+  const ILLUSTRATOR_TOOLS: Array<{
+    id: DrawingToolId;
+    shortcut: string;
+    label: string;
+    icon: React.ReactNode;
+  }> = [
+    {
+      id: 'select',
+      shortcut: 'V',
+      label: 'Selezione & Trasforma (V)',
+      icon: <MousePointer className="w-4 h-4" />,
+    },
+    {
+      id: 'direct-select',
+      shortcut: 'A',
+      label: 'Selezione Diretta Nodi Bézier (A)',
+      icon: <Crosshair className="w-4 h-4" />,
+    },
+    {
+      id: 'pen',
+      shortcut: 'P',
+      label: 'Penna Tracciati Bézier (P)',
+      icon: <PenTool className="w-4 h-4" />,
+    },
+    {
+      id: 'blob',
+      shortcut: '⇧B',
+      label: 'Macchia Blob col Cursore Libero (Shift+B)',
+      icon: <Sparkles className="w-4 h-4" />,
+    },
+    {
+      id: 'brush',
+      shortcut: 'B',
+      label: 'Pennello Calligrafico Fluido (B)',
+      icon: <Paintbrush className="w-4 h-4" />,
+    },
+    {
+      id: 'text-box',
+      shortcut: 'T',
+      label: 'Casella di Testo · Montserrat & Akena Otos (T)',
+      icon: <Type className="w-4 h-4" />,
+    },
+    {
+      id: 'shape',
+      shortcut: 'M',
+      label: 'Forme Geometriche Vettoriali (M)',
+      icon: <Shapes className="w-4 h-4" />,
+    },
+    {
+      id: 'checkerboard',
+      shortcut: 'W',
+      label: 'Scacchiera Ondulata Wavy Checker (W)',
+      icon: <Grid className="w-4 h-4" />,
+    },
+    {
+      id: 'stamp',
+      shortcut: 'S',
+      label: 'Timbri Ufficiali Fatti a mano (S)',
+      icon: <Stamp className="w-4 h-4" />,
+    },
+    {
+      id: 'eyedropper',
+      shortcut: 'I',
+      label: 'Contagocce Colore & Font (I)',
+      icon: <Pipette className="w-4 h-4" />,
+    },
+  ];
+
   return (
-    <div className="space-y-4">
-      {/* Barra Superiore del Builder: Selettore Scheda Associata, Preset Dimensioni, Dropdown Partner Brand Kit, Zoom e Esportazione */}
-      <div className="bg-[#F4ECE1] border border-[#1A2B4C]/15 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
-        {/* Preset rapidi & Input L x A */}
+    <div
+      data-testid="illustrator-workspace"
+      className={`rounded-xl border shadow-xl overflow-hidden transition-colors ${shellBg}`}
+    >
+      {/* Hidden input per caricamento file font OTF / TTF / WOFF2 */}
+      <input
+        ref={fontFileInputRef}
+        type="file"
+        accept=".otf,.ttf,.woff,.woff2"
+        onChange={handleCustomFontUpload}
+        className="hidden"
+      />
+
+      {/* BARRA SUPERIORE CONTESTUALE ADOBE ILLUSTRATOR (Control Bar) */}
+      <div
+        className={`px-3 py-2 border-b flex flex-wrap items-center justify-between gap-2 ${panelBg}`}
+      >
+        {/* Blocco Sinistro: Badge Ai + Selettore Scheda + Formato + Undo/Redo */}
         <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#FF9A00]/15 border border-[#FF9A00]/40 text-[#FF9A00] text-xs font-bold tracking-tight">
+            <span className="font-mono font-extrabold">Ai</span>
+            <span className="hidden sm:inline">Vector Studio</span>
+          </div>
+
           {workshops.length > 0 && onSelectWorkshop && (
-            <div className="flex items-center gap-2 bg-[#EADDCD] px-3 py-1.5 rounded-lg border border-[#1A2B4C]/25">
+            <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded border ${inputBg}`}>
               <label
                 htmlFor="builder-workshop-select"
-                className="text-xs font-bold text-[#1A2B4C] whitespace-nowrap"
+                className="text-[11px] font-bold whitespace-nowrap opacity-80"
               >
-                Progetto Scheda:
+                Scheda:
               </label>
               <select
                 id="builder-workshop-select"
@@ -736,12 +1736,13 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                 value={activeWorkshopId}
                 onChange={(e) => {
                   setSelectedId(null);
+                  setSelectedNodeIndex(null);
                   onSelectWorkshop(e.target.value);
                 }}
-                className="bg-transparent text-xs font-semibold text-[#1A2B4C] focus:outline-none cursor-pointer max-w-[220px] truncate"
+                className="bg-transparent text-xs font-semibold focus:outline-none cursor-pointer max-w-[190px] truncate"
               >
                 {workshops.map((ws) => (
-                  <option key={ws.id} value={ws.id}>
+                  <option key={ws.id} value={ws.id} className="bg-[#252526] text-white">
                     {ws.title} ({ws.ticketPrice}€)
                   </option>
                 ))}
@@ -749,97 +1750,181 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
             </div>
           )}
 
-          <span className="text-xs font-bold text-[#1A2B4C] mr-1">Formato Canvas:</span>
-          {CANVAS_PRESETS.map((preset) => (
+          {/* Preset Dimensioni Tavola */}
+          <div className="flex items-center gap-1">
+            {CANVAS_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() =>
+                  setCanvasSize({
+                    width: preset.width,
+                    height: preset.height,
+                    presetId: preset.id,
+                  })
+                }
+                className={`px-2 py-1 rounded text-[11px] font-semibold transition-colors whitespace-nowrap ${
+                  canvasSize.presetId === preset.id
+                    ? 'bg-[#B85B43] text-white'
+                    : `${inputBg} hover:opacity-85`
+                }`}
+              >
+                {preset.id}
+              </button>
+            ))}
+          </div>
+
+          {/* Undo / Redo */}
+          <div className={`flex items-center rounded border p-0.5 ${inputBg}`}>
             <button
-              key={preset.id}
               type="button"
-              onClick={() =>
-                setCanvasSize({
-                  width: preset.width,
-                  height: preset.height,
-                  presetId: preset.id,
-                })
-              }
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
-                canvasSize.presetId === preset.id
-                  ? 'bg-[#1A2B4C] text-[#EADDCD]'
-                  : 'bg-[#EADDCD] text-[#1A2B4C] hover:bg-[#1A2B4C]/10'
-              }`}
+              onClick={handleUndo}
+              disabled={historyPast.length === 0}
+              title="Annulla (Ctrl+Z)"
+              aria-label="Annulla ultima modifica"
+              className="p-1 rounded hover:bg-white/10 disabled:opacity-30"
             >
-              {preset.label}
+              <Undo2 className="w-3.5 h-3.5" />
             </button>
-          ))}
-
-          <div className="flex items-center gap-1.5 ml-1 bg-[#EADDCD] px-2.5 py-1 rounded-lg border border-[#1A2B4C]/15">
-            <label htmlFor="canvas-width-input" className="text-[11px] font-semibold text-[#1A2B4C]">
-              L:
-            </label>
-            <input
-              id="canvas-width-input"
-              type="number"
-              min={300}
-              max={4000}
-              value={canvasSize.width}
-              onChange={(e) =>
-                setCanvasSize((prev) => ({
-                  ...prev,
-                  width: Math.max(300, Number(e.target.value) || 1080),
-                  presetId: 'custom',
-                }))
-              }
-              className="w-16 text-xs font-mono tabular-nums bg-transparent text-[#1A2B4C] font-semibold focus:outline-none"
-            />
-            <span className="text-xs text-[#1A2B4C]/50">×</span>
-            <label htmlFor="canvas-height-input" className="text-[11px] font-semibold text-[#1A2B4C]">
-              A:
-            </label>
-            <input
-              id="canvas-height-input"
-              type="number"
-              min={300}
-              max={4000}
-              value={canvasSize.height}
-              onChange={(e) =>
-                setCanvasSize((prev) => ({
-                  ...prev,
-                  height: Math.max(300, Number(e.target.value) || 1350),
-                  presetId: 'custom',
-                }))
-              }
-              className="w-16 text-xs font-mono tabular-nums bg-transparent text-[#1A2B4C] font-semibold focus:outline-none"
-            />
-            <span className="text-[11px] font-mono text-[#1A2B4C]/60">px</span>
+            <button
+              type="button"
+              onClick={handleRedo}
+              disabled={historyFuture.length === 0}
+              title="Ripristina (Ctrl+Y)"
+              aria-label="Ripristina modifica"
+              className="p-1 rounded hover:bg-white/10 disabled:opacity-30"
+            >
+              <Redo2 className="w-3.5 h-3.5" />
+            </button>
           </div>
 
-          {/* Menu a Tendina Partner nel Builder Grafico */}
-          <div className="flex items-center gap-2 bg-[#EADDCD] px-3 py-1.5 rounded-lg border border-[#B85B43]/40">
-            <Building2 className="w-3.5 h-3.5 text-[#B85B43] shrink-0" />
-            <label
-              htmlFor="builder-partner-dropdown"
-              className="text-xs font-bold text-[#1A2B4C] whitespace-nowrap"
+          {/* Barra Allineamento Rapido Illustrator (6 direzioni) */}
+          <div
+            className={`hidden xl:flex items-center gap-0.5 rounded border px-1 py-0.5 ${inputBg}`}
+            title="Allinea elemento selezionato alla Tavola da Disegno"
+          >
+            <button
+              type="button"
+              disabled={!selectedElement}
+              onClick={() => alignSelectedElement('left')}
+              title="Allinea a sinistra"
+              className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-[10px] font-mono"
             >
-              Partner Brand Kit:
-            </label>
-            <select
-              id="builder-partner-dropdown"
-              data-testid="builder-partner-dropdown"
-              value={selectedPartnerId}
-              onChange={(e) => handlePartnerDropdownChange(e.target.value)}
-              className="bg-transparent text-xs font-semibold text-[#1A2B4C] focus:outline-none cursor-pointer"
+              ⇤
+            </button>
+            <button
+              type="button"
+              disabled={!selectedElement}
+              onClick={() => alignSelectedElement('center-h')}
+              title="Centra orizzontalmente sulla tavola"
+              className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-[10px] font-mono"
             >
-              <option value="">— Nessun Partner (Solo Fatti a mano) —</option>
-              {partners.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} ({p.logoText} · {p.fontStyle})
-                </option>
-              ))}
-            </select>
+              ⇹
+            </button>
+            <button
+              type="button"
+              disabled={!selectedElement}
+              onClick={() => alignSelectedElement('right')}
+              title="Allinea a destra"
+              className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-[10px] font-mono"
+            >
+              ⇥
+            </button>
+            <span className="opacity-30 px-0.5">|</span>
+            <button
+              type="button"
+              disabled={!selectedElement}
+              onClick={() => alignSelectedElement('top')}
+              title="Allinea in alto"
+              className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-[10px] font-mono"
+            >
+              ⇡
+            </button>
+            <button
+              type="button"
+              disabled={!selectedElement}
+              onClick={() => alignSelectedElement('center-v')}
+              title="Centra verticalmente sulla tavola"
+              className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-[10px] font-mono"
+            >
+              ⇳
+            </button>
+            <button
+              type="button"
+              disabled={!selectedElement}
+              onClick={() => alignSelectedElement('bottom')}
+              title="Allinea in basso"
+              className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-[10px] font-mono"
+            >
+              ⇣
+            </button>
           </div>
+
+          {/* Controlli Contestuali per lo Strumento Attivo */}
+          {activeTool === 'blob' && (
+            <div
+              data-testid="blob-tool-context-bar"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#B85B43]/20 border border-[#B85B43]/50 text-xs"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-[#B85B43]" />
+              <span className="font-bold text-[11px]">Macchia col Cursore:</span>
+              <button
+                type="button"
+                data-testid="blob-mode-lasso-btn"
+                onClick={() => setBlobMode('freeform-lasso')}
+                className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
+                  blobMode === 'freeform-lasso'
+                    ? 'bg-[#B85B43] text-white'
+                    : 'hover:bg-white/10'
+                }`}
+              >
+                Lazo Forma Libera
+              </button>
+              <button
+                type="button"
+                data-testid="blob-mode-brush-btn"
+                onClick={() => setBlobMode('blob-brush-merge')}
+                className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
+                  blobMode === 'blob-brush-merge'
+                    ? 'bg-[#B85B43] text-white'
+                    : 'hover:bg-white/10'
+                }`}
+              >
+                Pennello Blob Unione
+              </button>
+            </div>
+          )}
+
+          {activeTool === 'pen' && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#0D66D0]/20 border border-[#0D66D0]/50 text-xs">
+              <PenTool className="w-3.5 h-3.5 text-[#3B9EFF]" />
+              <span className="text-[11px] font-semibold">
+                Punti posizionati: {penDraftPoints.length}
+              </span>
+              {penDraftPoints.length >= 2 && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => finishPenPath(true)}
+                    className="px-2 py-0.5 rounded bg-[#0D66D0] text-white text-[11px] font-semibold"
+                  >
+                    Chiudi Forma (Invio)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => finishPenPath(false)}
+                    className="px-2 py-0.5 rounded bg-white/10 text-[11px] font-semibold"
+                  >
+                    Tracciato Aperto
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </div>
 
-        {/* Controlli Zoom & Export Alta Risoluzione */}
-        <div className="flex flex-wrap items-center gap-2">
+        {/* Blocco Destro: Righelli, Griglia, Tema, Zoom, Export e Salva Cloud */}
+        <div className="flex flex-wrap items-center gap-1.5">
           {lastSavedLabel && (
             <span
               data-testid="builder-autosave-status"
@@ -849,35 +1934,78 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
             </span>
           )}
 
-          <div className="flex items-center bg-[#EADDCD] rounded-lg border border-[#1A2B4C]/15 p-0.5">
+          <button
+            type="button"
+            onClick={() => setShowRulers((r) => !r)}
+            title="Mostra/Nascondi Righelli Pixel"
+            className={`p-1.5 rounded border text-xs ${
+              showRulers ? 'bg-[#0D66D0] text-white border-[#0D66D0]' : inputBg
+            }`}
+          >
+            <Ruler className="w-3.5 h-3.5" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowGrid((g) => !g)}
+            title="Mostra/Nascondi Griglia Tavola"
+            className={`p-1.5 rounded border text-xs ${
+              showGrid ? 'bg-[#0D66D0] text-white border-[#0D66D0]' : inputBg
+            }`}
+          >
+            <Grid className="w-3.5 h-3.5" />
+          </button>
+
+          {/* Switch Tema Adobe Dark Pro vs Beige Kraft */}
+          <button
+            type="button"
+            data-testid="builder-theme-toggle"
+            onClick={toggleWorkspaceTheme}
+            title="Cambia interfaccia tra Tema Scuro Adobe Pro e Tema Beige Kraft"
+            className={`flex items-center gap-1 px-2.5 py-1 rounded border text-[11px] font-semibold ${inputBg}`}
+          >
+            {isDark ? (
+              <>
+                <Sun className="w-3.5 h-3.5 text-[#D4A373]" />
+                <span className="hidden md:inline">Tema Kraft</span>
+              </>
+            ) : (
+              <>
+                <Moon className="w-3.5 h-3.5 text-[#1A2B4C]" />
+                <span className="hidden md:inline">Tema Adobe Pro</span>
+              </>
+            )}
+          </button>
+
+          {/* Zoom */}
+          <div className={`flex items-center rounded border p-0.5 ${inputBg}`}>
             <button
               type="button"
-              onClick={() => setZoom((z) => Math.max(0.25, +(z - 0.1).toFixed(2)))}
+              onClick={() => setZoom((z) => Math.max(0.25, +(z - 0.08).toFixed(2)))}
               aria-label="Riduci zoom"
-              className="p-1.5 text-[#1A2B4C] hover:bg-[#1A2B4C]/10 rounded"
+              className="p-1 rounded hover:bg-white/10"
             >
               <ZoomOut className="w-3.5 h-3.5" />
             </button>
-            <span className="px-2 text-xs font-mono tabular-nums font-semibold text-[#1A2B4C]">
+            <span className="px-1.5 text-[11px] font-mono tabular-nums font-semibold">
               {Math.round(zoom * 100)}%
             </span>
             <button
               type="button"
-              onClick={() => setZoom((z) => Math.min(1.4, +(z + 0.1).toFixed(2)))}
+              onClick={() => setZoom((z) => Math.min(1.5, +(z + 0.08).toFixed(2)))}
               aria-label="Aumenta zoom"
-              className="p-1.5 text-[#1A2B4C] hover:bg-[#1A2B4C]/10 rounded"
+              className="p-1 rounded hover:bg-white/10"
             >
               <ZoomIn className="w-3.5 h-3.5" />
             </button>
             <button
               type="button"
               onClick={() => {
-                setZoom(0.52);
+                setZoom(0.48);
                 setPan({ x: 0, y: 0 });
               }}
-              aria-label="Ripristina vista canvas"
-              className="p-1.5 text-[#1A2B4C] hover:bg-[#1A2B4C]/10 rounded"
-              title="Centra vista"
+              title="Adatta tavola allo schermo"
+              className="p-1 rounded hover:bg-white/10"
             >
               <Maximize2 className="w-3.5 h-3.5" />
             </button>
@@ -891,10 +2019,10 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                 onResetToWorkshopDefault();
               }}
               title="Rigenera il layout predefinito dai dati della scheda"
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-[#EADDCD] border border-[#1A2B4C]/25 text-[#1A2B4C] text-xs font-semibold rounded-lg hover:bg-[#1A2B4C]/10 transition-colors whitespace-nowrap"
+              className={`flex items-center gap-1 px-2.5 py-1 rounded border text-[11px] font-semibold ${inputBg} hover:opacity-85`}
             >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>Rigenera Base</span>
+              <RotateCcw className="w-3 h-3" />
+              <span className="hidden sm:inline">Rigenera</span>
             </button>
           )}
 
@@ -909,10 +2037,10 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                 canvasSize.height
               )
             }
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-[#EADDCD] border border-[#1A2B4C]/25 text-[#1A2B4C] text-xs font-semibold rounded-lg hover:bg-[#D4A373]/30 transition-colors whitespace-nowrap"
+            className={`flex items-center gap-1 px-2.5 py-1 rounded border text-[11px] font-semibold ${inputBg} hover:opacity-85`}
           >
-            <Download className="w-3.5 h-3.5" />
-            <span>Esporta SVG</span>
+            <Download className="w-3 h-3" />
+            <span>SVG</span>
           </button>
 
           <button
@@ -926,10 +2054,10 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                 canvasSize.height
               )
             }
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-[#B85B43] text-[#EADDCD] text-xs font-semibold rounded-lg hover:bg-[#a04c36] transition-colors whitespace-nowrap"
+            className="flex items-center gap-1 px-2.5 py-1 bg-[#B85B43] text-white text-[11px] font-semibold rounded hover:bg-[#a04c36] transition-colors"
           >
-            <Download className="w-3.5 h-3.5" />
-            <span>Esporta PNG HD</span>
+            <Download className="w-3 h-3" />
+            <span>PNG HD</span>
           </button>
 
           {onSaveTemplateCloud && (
@@ -938,7 +2066,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
               data-testid="builder-save-cloud-btn"
               onClick={onSaveTemplateCloud}
               disabled={isSavingCloud}
-              className="px-3 py-1.5 bg-[#4A6B53] text-[#EADDCD] text-xs font-semibold rounded-lg hover:bg-[#3d5945] transition-colors whitespace-nowrap disabled:opacity-50"
+              className="px-2.5 py-1 bg-[#4A6B53] text-white text-[11px] font-semibold rounded hover:bg-[#3d5945] transition-colors disabled:opacity-50"
             >
               {isSavingCloud ? 'Salvataggio...' : 'Salva Cloud'}
             </button>
@@ -946,336 +2074,215 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
         </div>
       </div>
 
-      {/* Area Principale a 3 Zone: Floating Toolbar Brand-Safe | Viewport Canvas SVG | Livelli Z-Index & Clipboard */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-        {/* Colonna 1 (lg:col-span-3): Toolbar "Brand-Safe" Floating Menu + Asset Partner */}
-        <div className="lg:col-span-3 bg-[#F4ECE1] border border-[#1A2B4C]/15 rounded-xl p-4 space-y-5">
-          <div>
-            <h2 className="text-xs font-bold uppercase tracking-wider text-[#1A2B4C]/70 mb-2.5">
-              Strumenti Vettoriali
-            </h2>
-            <div className="grid grid-cols-2 gap-1.5">
-              <button
-                type="button"
-                onClick={() => setActiveTool('select')}
-                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
-                  activeTool === 'select'
-                    ? 'bg-[#1A2B4C] text-[#EADDCD]'
-                    : 'bg-[#EADDCD]/70 text-[#1A2B4C] hover:bg-[#EADDCD]'
-                }`}
-              >
-                <MousePointer className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">Sposta / Modifica</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveTool('brush')}
-                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
-                  activeTool === 'brush'
-                    ? 'bg-[#B85B43] text-[#EADDCD]'
-                    : 'bg-[#EADDCD]/70 text-[#1A2B4C] hover:bg-[#EADDCD]'
-                }`}
-              >
-                <Paintbrush className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">Pennello Fluido</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveTool('blob')}
-                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
-                  activeTool === 'blob'
-                    ? 'bg-[#B85B43] text-[#EADDCD]'
-                    : 'bg-[#EADDCD]/70 text-[#1A2B4C] hover:bg-[#EADDCD]'
-                }`}
-              >
-                <Sparkles className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">Macchia (Blob)</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveTool('checkerboard')}
-                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
-                  activeTool === 'checkerboard'
-                    ? 'bg-[#B85B43] text-[#EADDCD]'
-                    : 'bg-[#EADDCD]/70 text-[#1A2B4C] hover:bg-[#EADDCD]'
-                }`}
-              >
-                <Grid className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">Wavy Checker</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveTool('stamp')}
-                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
-                  activeTool === 'stamp'
-                    ? 'bg-[#B85B43] text-[#EADDCD]'
-                    : 'bg-[#EADDCD]/70 text-[#1A2B4C] hover:bg-[#EADDCD]'
-                }`}
-              >
-                <Stamp className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">Timbri Brand</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={onOpenFontModal}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold bg-[#4A6B53] text-[#EADDCD] hover:bg-[#3d5945] transition-colors"
-              >
-                <Type className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">Crea Glifi &amp; Font</span>
-              </button>
-            </div>
+      {/* WORKSPACE PRINCIPALE A 3 COLONNE STILE ADOBE ILLUSTRATOR:
+          [Dock Strumenti Verticale Sinistro] | [Tavola da Disegno con Righelli] | [Pannelli Studio Destri] */}
+      <div className="flex flex-col lg:flex-row min-h-[720px]">
+        {/* 1. LEFT VERTICAL TOOL DOCK (Stile Adobe Illustrator) */}
+        <div
+          data-testid="illustrator-left-toolbar"
+          className={`flex lg:flex-col items-center justify-between lg:justify-start gap-1.5 p-2 border-b lg:border-b-0 lg:border-r shrink-0 ${panelBg}`}
+        >
+          <div className="flex lg:flex-col items-center gap-1 flex-wrap">
+            {ILLUSTRATOR_TOOLS.map((tool) => {
+              const isActive = activeTool === tool.id;
+              return (
+                <button
+                  key={tool.id}
+                  type="button"
+                  data-testid={`tool-btn-${tool.id}`}
+                  onClick={() => {
+                    setActiveTool(tool.id);
+                    if (tool.id === 'text-box') {
+                      setRightDockTab('character');
+                    } else if (tool.id === 'direct-select' || tool.id === 'shape') {
+                      setRightDockTab('properties');
+                    }
+                  }}
+                  title={tool.label}
+                  className={`relative group w-10 h-10 rounded-lg flex flex-col items-center justify-center transition-all ${
+                    isActive
+                      ? 'bg-[#0D66D0] text-white shadow-inner ring-1 ring-white/30'
+                      : 'hover:bg-white/10 opacity-85 hover:opacity-100'
+                  }`}
+                >
+                  {tool.icon}
+                  <span className="text-[9px] font-mono leading-none mt-0.5 opacity-75">
+                    {tool.shortcut}
+                  </span>
+                </button>
+              );
+            })}
           </div>
 
-          {/* Box Asset Grafici del Partner Selezionato */}
-          {activePartner && (
-            <div
-              data-testid="active-partner-kit-panel"
-              className="p-3 bg-[#EADDCD] rounded-xl border border-[#B85B43]/35 space-y-2.5"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-[#B85B43]">
-                  Asset Partner: {activePartner.name}
-                </span>
-                <span className="px-2 py-0.5 rounded bg-[#1A2B4C] text-[#EADDCD] text-[10px] font-mono">
-                  {activePartner.logoText}
-                </span>
-              </div>
-              <p className="text-[11px] text-[#1A2B4C]/80 leading-snug">
-                Font: <strong>{activePartner.fontStyle}</strong> · Forma:{' '}
-                <strong>{activePartner.logoShape}</strong>
-              </p>
-
-              {/* Swatches Palette Partner */}
-              <div>
-                <span className="block text-[10px] font-bold uppercase text-[#1A2B4C]/70 mb-1">
-                  Palette Colori Partner (clicca per usare):
-                </span>
-                <div className="flex items-center gap-2">
-                  {activePartner.palette.map((hex, i) => (
-                    <button
-                      key={`${hex}-${i}`}
-                      type="button"
-                      onClick={() => {
-                        setActiveColor(hex);
-                        if (selectedId) {
-                          setElements((prev) =>
-                            prev.map((el) =>
-                              el.id === selectedId && !el.locked ? { ...el, color: hex } : el
-                            )
-                          );
-                        }
-                      }}
-                      className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg border text-[11px] font-mono font-semibold transition-all ${
-                        activeColor === hex
-                          ? 'bg-[#1A2B4C] text-[#EADDCD] border-[#1A2B4C]'
-                          : 'bg-[#F4ECE1] text-[#1A2B4C] border-[#1A2B4C]/20'
-                      }`}
-                    >
-                      <span
-                        className="w-3.5 h-3.5 rounded-full border border-black/20 shrink-0"
-                        style={{ backgroundColor: hex }}
-                      />
-                      <span>{hex}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={handleInsertFullPartnerKitOnCanvas}
-                className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 bg-[#B85B43] text-[#EADDCD] rounded-lg text-xs font-semibold hover:bg-[#a04c36] transition-colors"
+          {/* Doppio Selettore Riempimento (Fill) / Traccia (Stroke) stile Illustrator in fondo al dock */}
+          <div className="hidden lg:flex flex-col items-center gap-2 mt-4 pt-3 border-t border-white/10">
+            <div className="relative w-10 h-10" title={`Riempimento: ${activeColor} · Traccia: ${activeStrokeColor}`}>
+              {/* Quadrato Riempimento (Fill) */}
+              <div
+                className="w-6 h-6 rounded-sm border-2 border-white shadow cursor-pointer"
+                style={{ backgroundColor: activeColor }}
+                onClick={() => setRightDockTab('properties')}
+              />
+              {/* Quadrato Forato Traccia (Stroke) */}
+              <div
+                className="w-6 h-6 rounded-sm border-2 border-white/80 absolute bottom-0 right-0 flex items-center justify-center cursor-pointer"
+                style={{
+                  backgroundColor:
+                    activeStrokeColor && activeStrokeColor !== 'none'
+                      ? activeStrokeColor
+                      : 'transparent',
+                }}
+                onClick={() => {
+                  const nextStroke =
+                    activeStrokeColor === 'none' ? '#1A2B4C' : 'none';
+                  setActiveStrokeColor(nextStroke);
+                  if (nextStroke !== 'none' && activeStrokeWidth === 0) {
+                    setActiveStrokeWidth(4);
+                  }
+                  if (selectedElement && !selectedElement.locked) {
+                    commitElementsChange((prev) =>
+                      prev.map((el) =>
+                        el.id === selectedElement.id
+                          ? {
+                              ...el,
+                              strokeColor: nextStroke,
+                              strokeWidth:
+                                nextStroke !== 'none'
+                                  ? Math.max(3, el.strokeWidth || 4)
+                                  : 0,
+                            }
+                          : el
+                      )
+                    );
+                  }
+                }}
               >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Inserisci Logo &amp; Macchia Partner</span>
-              </button>
-            </div>
-          )}
-
-          {/* Selettore Timbro quando lo strumento Timbro è attivo */}
-          {activeTool === 'stamp' && (
-            <div className="p-3 bg-[#EADDCD] rounded-lg border border-[#1A2B4C]/15 space-y-2">
-              <span className="block text-xs font-bold text-[#1A2B4C]">
-                Scegli Timbro Vettoriale (clicca sul canvas):
-              </span>
-              <div className="grid grid-cols-2 gap-1.5">
-                {STAMP_CATALOG.map((st) => (
-                  <button
-                    key={st.id}
-                    type="button"
-                    onClick={() => setActiveStamp(st.id)}
-                    className={`px-2.5 py-1.5 rounded text-[11px] font-semibold text-left truncate ${
-                      activeStamp === st.id
-                        ? 'bg-[#1A2B4C] text-[#EADDCD]'
-                        : 'bg-[#F4ECE1] text-[#1A2B4C] hover:bg-[#1A2B4C]/10'
-                    }`}
-                  >
-                    {st.label}
-                  </button>
-                ))}
+                <div className="w-2.5 h-2.5 bg-[#252526]" />
               </div>
             </div>
-          )}
 
-          {/* Palette Fissa "Brand-Safe" */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-bold uppercase tracking-wider text-[#1A2B4C]/70">
-                Palette Fissa Brand-Safe
-              </span>
-              <span className="text-[11px] font-mono text-[#1A2B4C]">{activeColor}</span>
-            </div>
-            <div className="space-y-1.5">
-              {BRAND_PALETTE.map((swatch) => (
+            {/* Swatches rapidi Brand-Safe nel dock */}
+            <div className="grid grid-cols-2 gap-1">
+              {BRAND_PALETTE.map((sw) => (
                 <button
-                  key={swatch.id}
+                  key={sw.id}
                   type="button"
+                  title={`${sw.name} (${sw.hex})`}
                   onClick={() => {
-                    setActiveColor(swatch.hex);
-                    if (selectedId) {
-                      setElements((prev) =>
+                    setActiveColor(sw.hex);
+                    if (selectedElement && !selectedElement.locked) {
+                      commitElementsChange((prev) =>
                         prev.map((el) =>
-                          el.id === selectedId && !el.locked ? { ...el, color: swatch.hex } : el
+                          el.id === selectedElement.id ? { ...el, color: sw.hex } : el
                         )
                       );
                     }
                   }}
-                  className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg border transition-all ${
-                    activeColor === swatch.hex
-                      ? 'bg-[#1A2B4C] text-[#EADDCD] border-[#1A2B4C]'
-                      : 'bg-[#EADDCD]/60 text-[#1A2B4C] border-[#1A2B4C]/15 hover:border-[#1A2B4C]/40'
+                  className={`w-4 h-4 rounded-sm border ${
+                    activeColor === sw.hex
+                      ? 'border-white scale-110 ring-1 ring-[#0D66D0]'
+                      : 'border-black/40'
                   }`}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <span
-                      className="w-5 h-5 rounded-full border border-black/20 shrink-0"
-                      style={{ backgroundColor: swatch.hex }}
-                    />
-                    <div className="text-left">
-                      <div className="text-xs font-semibold leading-tight">{swatch.name}</div>
-                      <div
-                        className={`text-[10px] ${
-                          activeColor === swatch.hex ? 'text-[#EADDCD]/75' : 'text-[#1A2B4C]/60'
-                        }`}
-                      >
-                        {swatch.role}
-                      </div>
-                    </div>
-                  </div>
-                  <span className="text-[11px] font-mono">{swatch.hex}</span>
-                </button>
+                  style={{ backgroundColor: sw.hex }}
+                />
               ))}
             </div>
-          </div>
 
-          {/* Spessore Tratto e Texture Filtro */}
-          <div className="space-y-3 pt-1 border-t border-[#1A2B4C]/10">
-            <div>
-              <div className="flex justify-between text-xs font-semibold text-[#1A2B4C] mb-1">
-                <label htmlFor="builder-brush-size">Calibro Pennello / Smoothing</label>
-                <span className="font-mono tabular-nums">{brushSize} px</span>
-              </div>
-              <input
-                id="builder-brush-size"
-                type="range"
-                min={6}
-                max={64}
-                value={brushSize}
-                onChange={(e) => setBrushSize(Number(e.target.value))}
-                className="w-full accent-[#B85B43]"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="builder-texture-select"
-                className="block text-xs font-semibold text-[#1A2B4C] mb-1"
-              >
-                Texture Vettoriale Attiva
-              </label>
-              <select
-                id="builder-texture-select"
-                value={selectedElement ? selectedElement.textureType : activeTexture}
-                onChange={(e) => {
-                  const val = e.target.value as TextureFilterType;
-                  setActiveTexture(val);
-                  if (selectedId) {
-                    setElements((prev) =>
-                      prev.map((el) => (el.id === selectedId ? { ...el, textureType: val } : el))
-                    );
-                  }
-                }}
-                className="w-full px-2.5 py-2 bg-[#EADDCD] border border-[#1A2B4C]/20 rounded-lg text-xs font-semibold text-[#1A2B4C]"
-              >
-                <option value="rough-brush">Texture Pennellata Ruvida</option>
-                <option value="ink-porosity">Porosità dell&apos;Inchiostro</option>
-                <option value="cyanotype">Effetto Cianotipia Solare</option>
-                <option value="materic-blob">Riempimento Materico Blob</option>
-                <option value="none">Tracciato Vettoriale Puro</option>
-              </select>
-            </div>
-
-            {/* Sfondo Carta */}
-            <div>
-              <span className="block text-xs font-semibold text-[#1A2B4C] mb-1.5">
-                Sfondo Tavola da Disegno
-              </span>
-              <div className="flex items-center gap-1.5">
-                {BRAND_PALETTE.map((sw) => (
-                  <button
-                    key={sw.id}
-                    type="button"
-                    onClick={() => setBackgroundColor(sw.hex)}
-                    aria-label={`Sfondo canvas ${sw.name}`}
-                    className={`w-6 h-6 rounded-md border ${
-                      backgroundColor === sw.hex
-                        ? 'border-[#1A2B4C] ring-2 ring-[#B85B43]'
-                        : 'border-[#1A2B4C]/25'
-                    }`}
-                    style={{ backgroundColor: sw.hex }}
-                  />
-                ))}
-              </div>
-            </div>
+            <button
+              type="button"
+              onClick={onOpenFontModal}
+              title="Laboratorio Glifi Vettoriali & Font Custom"
+              className="w-9 h-9 rounded-lg bg-[#4A6B53] text-white flex items-center justify-center hover:bg-[#3d5945] mt-1"
+            >
+              <Sparkles className="w-4 h-4" />
+            </button>
           </div>
         </div>
 
-        {/* Colonna 2 (lg:col-span-6): Area di Disegno Vettoriale Cross-Device */}
-        <div className="lg:col-span-6 flex flex-col items-center">
-          {/* Barra stato input Pointer Events & Feedback */}
-          <div className="w-full flex items-center justify-between px-3 py-2 mb-2 bg-[#F4ECE1] border border-[#1A2B4C]/15 rounded-lg text-xs">
-            <span className="font-medium text-[#1A2B4C] truncate">{pointerModeLabel}</span>
-            <div className="flex items-center gap-3 shrink-0">
-              <span className="font-mono tabular-nums text-[#B85B43]">
+        {/* 2. CENTER ARTBOARD VIEWPORT CON RIGHELLI PIXEL E BOUNDING BOX ILLUSTRATOR */}
+        <div className={`flex-1 flex flex-col min-w-0 ${artboardSurroundBg}`}>
+          {/* Sotto-barra stato e scorciatoie contestuali */}
+          <div
+            className={`px-3 py-1.5 border-b text-[11px] flex flex-wrap items-center justify-between gap-2 ${panelBg}`}
+          >
+            <div className="flex items-center gap-3 truncate">
+              <span className="font-semibold text-[#FF9A00]">
+                {ILLUSTRATOR_TOOLS.find((t) => t.id === activeTool)?.label}
+              </span>
+              <span className={`hidden md:inline ${mutedText}`}>{pointerModeLabel}</span>
+            </div>
+            <div className="flex items-center gap-3 shrink-0 font-mono">
+              <span className={mutedText}>
+                X: {cursorCoords.x}px · Y: {cursorCoords.y}px
+              </span>
+              <span className="text-[#B85B43]">
                 Pressione: {Math.round(livePressure * 100)}%
               </span>
               {statusNotice && (
-                <span className="text-[#4A6B53] font-semibold">{statusNotice}</span>
+                <span className="text-[#4A6B53] font-sans font-bold">{statusNotice}</span>
               )}
             </div>
           </div>
 
-          {/* Contenitore Viewport con Pan & Zoom */}
-          <div className="w-full min-h-[540px] max-h-[740px] overflow-auto bg-[#1A2B4C]/10 border border-[#1A2B4C]/20 rounded-xl flex items-center justify-center p-6">
+          {/* Contenitore Righelli + Artboard */}
+          <div className="relative flex-1 overflow-auto flex items-center justify-center p-6 sm:p-10 min-h-[560px]">
+            {/* Righello Orizzontale Superiore */}
+            {showRulers && (
+              <div
+                className={`absolute top-0 left-6 right-0 h-5 border-b flex items-end px-2 select-none pointer-events-none text-[9px] font-mono ${panelBg} opacity-90 z-10`}
+              >
+                {[0, 200, 400, 540, 600, 800, 1000, 1080].map((tick) => (
+                  <span key={tick} className="mr-12 opacity-70">
+                    |{tick}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Righello Verticale Sinistro */}
+            {showRulers && (
+              <div
+                className={`absolute top-5 bottom-0 left-0 w-6 border-r flex flex-col items-center py-2 select-none pointer-events-none text-[9px] font-mono ${panelBg} opacity-90 z-10`}
+              >
+                {[0, 200, 400, 675, 800, 1000, 1200, 1350].map((tick) => (
+                  <span key={tick} className="mb-10 opacity-70">
+                    —{tick}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Artboard Tavola da Disegno */}
             <div
               style={{
                 width: Math.round(canvasSize.width * zoom),
                 height: Math.round(canvasSize.height * zoom),
                 transform: `translate(${pan.x}px, ${pan.y}px)`,
               }}
-              className="relative shadow-md border border-[#1A2B4C]/30 bg-[#EADDCD] shrink-0"
+              className="relative shadow-2xl border border-black/50 bg-[#EADDCD] shrink-0"
             >
+              {/* Etichetta Tavola stile Adobe Illustrator in alto a sinistra */}
+              <div className="absolute -top-6 left-0 flex items-center gap-2 text-[11px] font-mono opacity-75 pointer-events-none whitespace-nowrap">
+                <span>
+                  01 · Tavola {canvasSize.width}×{canvasSize.height}px
+                </span>
+                {selectedElement && (
+                  <span className="text-[#3B9EFF]">
+                    [{selectedElement.name} · {selectedElement.width}×{selectedElement.height}px]
+                  </span>
+                )}
+              </div>
+
               <svg
                 ref={svgRef}
                 data-testid="vector-canvas-svg"
                 viewBox={`0 0 ${canvasSize.width} ${canvasSize.height}`}
                 className={`w-full h-full block select-none touch-none ${
-                  activeTool === 'select' ? 'cursor-move' : 'cursor-crosshair'
+                  activeTool === 'select'
+                    ? 'cursor-default'
+                    : activeTool === 'direct-select'
+                    ? 'cursor-pointer'
+                    : 'cursor-crosshair'
                 }`}
                 onPointerDown={handleCanvasPointerDown}
                 onPointerMove={handleCanvasPointerMove}
@@ -1302,30 +2309,92 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                   fill="url(#kraft-paper-grain)"
                 />
 
+                {/* Griglia Vettoriale Smart Illustrator (Non esportata se disattivata, marcata data-ui-overlay) */}
+                {showGrid && (
+                  <g data-ui-overlay="true" className="pointer-events-none opacity-25">
+                    {Array.from({ length: Math.floor(canvasSize.width / 135) + 1 }).map(
+                      (_, i) => (
+                        <line
+                          key={`vg-${i}`}
+                          x1={i * 135}
+                          y1={0}
+                          x2={i * 135}
+                          y2={canvasSize.height}
+                          stroke="#1A2B4C"
+                          strokeWidth={i * 135 === canvasSize.width / 2 ? 2 : 1}
+                          strokeDasharray={i * 135 === canvasSize.width / 2 ? '8 6' : '3 6'}
+                        />
+                      )
+                    )}
+                    {Array.from({ length: Math.floor(canvasSize.height / 135) + 1 }).map(
+                      (_, i) => (
+                        <line
+                          key={`hg-${i}`}
+                          x1={0}
+                          y1={i * 135}
+                          x2={canvasSize.width}
+                          y2={i * 135}
+                          stroke="#1A2B4C"
+                          strokeWidth={i * 135 === canvasSize.height / 2 ? 2 : 1}
+                          strokeDasharray={i * 135 === canvasSize.height / 2 ? '8 6' : '3 6'}
+                        />
+                      )
+                    )}
+                  </g>
+                )}
+
                 {/* Rendering Livelli Vettoriali ordinati per Z-Index */}
                 {sortedElements.map((el) => {
                   if (!el.visible) return null;
                   const isSelected = el.id === selectedId;
                   const filterAttr = getFilterUrl(el.textureType);
 
+                  const transforms: string[] = [];
+                  if (el.rotation) {
+                    transforms.push(`rotate(${el.rotation} ${el.x} ${el.y})`);
+                  }
+                  if (el.flipX || el.flipY) {
+                    const sx = el.flipX ? -1 : 1;
+                    const sy = el.flipY ? -1 : 1;
+                    transforms.push(
+                      `translate(${el.x} ${el.y}) scale(${sx} ${sy}) translate(${-el.x} ${-el.y})`
+                    );
+                  }
+
                   return (
                     <g
                       key={el.id}
                       filter={filterAttr}
                       opacity={el.opacity}
-                      transform={
-                        el.rotation
-                          ? `rotate(${el.rotation} ${el.x} ${el.y})`
+                      transform={transforms.length ? transforms.join(' ') : undefined}
+                      onPointerDown={(e) => handleElementPointerDown(e, el)}
+                      className={
+                        activeTool === 'select' ||
+                        activeTool === 'direct-select' ||
+                        activeTool === 'eyedropper'
+                          ? 'cursor-pointer'
                           : undefined
                       }
-                      onPointerDown={(e) => handleElementPointerDown(e, el)}
-                      className={activeTool === 'select' ? 'cursor-pointer' : undefined}
                     >
-                      {/* Caso 1: Pennello Fluido, Macchia (Blob), Wavy Checkerboard */}
+                      {/* Caso 1: Pennello, Macchia Blob Libera, Forme Geometriche, Penna Bézier, Wavy Checkerboard */}
                       {(el.type === 'freehand' ||
                         el.type === 'blob' ||
+                        el.type === 'shape' ||
+                        el.type === 'pen-path' ||
                         el.type === 'checkerboard') && (
-                        <path d={el.pathData} fill={el.color} />
+                        <path
+                          d={el.pathData}
+                          fill={el.color || 'none'}
+                          stroke={
+                            el.strokeColor && el.strokeColor !== 'none'
+                              ? el.strokeColor
+                              : undefined
+                          }
+                          strokeWidth={el.strokeWidth || undefined}
+                          strokeDasharray={el.strokeDasharray || undefined}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
                       )}
 
                       {/* Caso 2: Timbri Vettoriali (Stamps) */}
@@ -1355,7 +2424,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                                 fill={el.color}
                                 fontSize={el.width * 0.22}
                                 fontWeight={600}
-                                style={{ fontFamily: '"Fraunces", Georgia, serif' }}
+                                style={{ fontFamily: '"Akena Otos", "Fraunces", Georgia, serif' }}
                               >
                                 Fatti
                               </text>
@@ -1367,7 +2436,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                                 fontSize={el.width * 0.16}
                                 fontStyle="italic"
                                 fontWeight={600}
-                                style={{ fontFamily: '"Fraunces", Georgia, serif' }}
+                                style={{ fontFamily: '"Akena Otos", "Fraunces", Georgia, serif' }}
                               >
                                 a mano
                               </text>
@@ -1376,18 +2445,16 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                         </g>
                       )}
 
-                      {/* Caso 3: Motore Testuale Texturizzato (Tastiera o Glifi a mano libera) */}
+                      {/* Caso 3: Casella di Testo Tipografica (Montserrat & Akena Otos in tutte le declinazioni) */}
                       {el.type === 'textured-text' && (
                         <g>
                           {el.isHandDrawnText ? (
-                            <g
-                              transform={`translate(${el.x - 380}, ${el.y - 160})`}
-                            >
+                            <g transform={`translate(${el.x - 380}, ${el.y - 160})`}>
                               <path d={el.pathData} fill={el.color} />
                             </g>
                           ) : (
                             <>
-                              {el.pathData && (
+                              {el.pathData && el.textureType !== 'none' && (
                                 <path
                                   d={el.pathData}
                                   fill={el.secondaryColor || '#B85B43'}
@@ -1396,74 +2463,253 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                                   }
                                 />
                               )}
-                              {(el.textContent || 'Fatti a mano')
-                                .split('\n')
-                                .map((line, idx, arr) => {
-                                  const fSize = el.fontSize || 48;
-                                  const startY =
-                                    el.y - ((arr.length - 1) * fSize * 0.6);
+                              {(() => {
+                                const fSize = el.fontSize || 48;
+                                const lHeight = el.lineHeight || 1.2;
+                                const boxW = el.textBoxWidth || el.width || 520;
+                                const maxChars = Math.max(
+                                  8,
+                                  Math.floor(boxW / Math.max(10, fSize * 0.54))
+                                );
+                                const wrapped = wrapPosterText(
+                                  el.textContent || 'Fatti a mano',
+                                  maxChars
+                                );
+                                const lines = wrapped.split('\n');
+                                const align = el.textAlign || 'center';
+                                const anchor =
+                                  align === 'left'
+                                    ? 'start'
+                                    : align === 'right'
+                                    ? 'end'
+                                    : 'middle';
+                                const textX =
+                                  align === 'left'
+                                    ? el.x - boxW / 2 + 16
+                                    : align === 'right'
+                                    ? el.x + boxW / 2 - 16
+                                    : el.x;
+                                const startY =
+                                  el.y - ((lines.length - 1) * fSize * lHeight) / 2;
+
+                                return lines.map((rawLine, idx) => {
+                                  const displayLine = formatElementTextLine(
+                                    rawLine,
+                                    el.textTransform
+                                  );
                                   return (
                                     <text
                                       key={idx}
-                                      x={el.x}
-                                      y={startY + idx * fSize * 1.2}
-                                      textAnchor="middle"
+                                      x={textX}
+                                      y={startY + idx * fSize * lHeight}
+                                      textAnchor={anchor}
                                       dominantBaseline="middle"
                                       fill={el.color}
+                                      stroke={
+                                        el.strokeColor && el.strokeColor !== 'none'
+                                          ? el.strokeColor
+                                          : undefined
+                                      }
+                                      strokeWidth={el.strokeWidth || undefined}
                                       fontSize={fSize}
                                       fontWeight={
-                                        el.fontStyle === 'craft-rounded' ? 700 : 600
+                                        el.fontWeight ||
+                                        (el.fontStyle === 'craft-rounded' ? 700 : 600)
+                                      }
+                                      fontStyle={el.fontItalic ? 'italic' : 'normal'}
+                                      letterSpacing={
+                                        el.letterSpacing ? `${el.letterSpacing}em` : undefined
                                       }
                                       style={{
-                                        fontFamily: getFontFamilyCss(el.fontStyle),
+                                        fontFamily: getElementFontCss(el),
                                       }}
                                     >
-                                      {line}
+                                      {displayLine}
                                     </text>
                                   );
-                                })}
+                                });
+                              })()}
                             </>
                           )}
                         </g>
                       )}
 
-                      {/* Cornice di selezione quando l'elemento è attivo */}
+                      {/* BOUNDING BOX ADOBE ILLUSTRATOR CON 8 MANIGLIE DI RIDIMENSIONAMENTO + MANIGLIA NODI DIRETTI (A) */}
                       {isSelected && (
-                        <rect
-                          x={el.x - el.width / 2 - 10}
-                          y={el.y - el.height / 2 - 10}
-                          width={el.width + 20}
-                          height={el.height + 20}
-                          fill="none"
-                          stroke="#1A2B4C"
-                          strokeWidth={2.5}
-                          strokeDasharray="8 6"
-                          rx={8}
-                        />
+                        <g data-ui-overlay="true">
+                          <rect
+                            x={el.x - el.width / 2 - 8}
+                            y={el.y - el.height / 2 - 8}
+                            width={el.width + 16}
+                            height={el.height + 16}
+                            fill="none"
+                            stroke="#0D66D0"
+                            strokeWidth={2.5}
+                            strokeDasharray={activeTool === 'direct-select' ? '4 4' : undefined}
+                          />
+
+                          {/* 8 Maniglie di scala quando siamo nello strumento Selezione (V) */}
+                          {activeTool === 'select' &&
+                            !el.locked &&
+                            ([
+                              ['nw', el.x - el.width / 2 - 8, el.y - el.height / 2 - 8],
+                              ['n', el.x, el.y - el.height / 2 - 8],
+                              ['ne', el.x + el.width / 2 + 8, el.y - el.height / 2 - 8],
+                              ['e', el.x + el.width / 2 + 8, el.y],
+                              ['se', el.x + el.width / 2 + 8, el.y + el.height / 2 + 8],
+                              ['s', el.x, el.y + el.height / 2 + 8],
+                              ['sw', el.x - el.width / 2 - 8, el.y + el.height / 2 + 8],
+                              ['w', el.x - el.width / 2 - 8, el.y],
+                            ] as const).map(([handleId, hx, hy]) => (
+                              <rect
+                                key={handleId}
+                                x={hx - 8}
+                                y={hy - 8}
+                                width={16}
+                                height={16}
+                                fill="#FFFFFF"
+                                stroke="#0D66D0"
+                                strokeWidth={3}
+                                className="cursor-nwse-resize"
+                                onPointerDown={(ev) => {
+                                  ev.stopPropagation();
+                                  const pt = toCanvasCoords(ev.clientX, ev.clientY);
+                                  setHistoryPast((past) => [...past.slice(-39), elements]);
+                                  setHistoryFuture([]);
+                                  isResizingHandleRef.current = {
+                                    elementId: el.id,
+                                    handle: handleId,
+                                    startX: pt.x,
+                                    startY: pt.y,
+                                    origX: el.x,
+                                    origY: el.y,
+                                    origW: el.width,
+                                    origH: el.height,
+                                    origFontSize: el.fontSize || 48,
+                                  };
+                                }}
+                              />
+                            ))}
+
+                          {/* NODI DI ANCORAGGIO BÉZIER (Control Points) quando siamo in Selezione Diretta (A) */}
+                          {activeTool === 'direct-select' &&
+                            el.controlPoints &&
+                            el.controlPoints.map((pt, nodeIdx) => {
+                              const isNodeSel = selectedNodeIndex === nodeIdx;
+                              const nextPt =
+                                el.controlPoints![(nodeIdx + 1) % el.controlPoints!.length];
+                              return (
+                                <g key={`node-${nodeIdx}`}>
+                                  <line
+                                    x1={pt.x}
+                                    y1={pt.y}
+                                    x2={nextPt.x}
+                                    y2={nextPt.y}
+                                    stroke="#3B9EFF"
+                                    strokeWidth={1.5}
+                                    strokeDasharray="4 4"
+                                  />
+                                  <circle
+                                    cx={pt.x}
+                                    cy={pt.y}
+                                    r={isNodeSel ? 12 : 9}
+                                    fill={isNodeSel ? '#0D66D0' : '#FFFFFF'}
+                                    stroke="#0D66D0"
+                                    strokeWidth={3.5}
+                                    className="cursor-move"
+                                    onPointerDown={(ev) => {
+                                      ev.stopPropagation();
+                                      setSelectedNodeIndex(nodeIdx);
+                                      setHistoryPast((past) => [...past.slice(-39), elements]);
+                                      setHistoryFuture([]);
+                                      isDraggingNodeRef.current = {
+                                        elementId: el.id,
+                                        nodeIndex: nodeIdx,
+                                      };
+                                    }}
+                                  />
+                                </g>
+                              );
+                            })}
+                        </g>
                       )}
                     </g>
                   );
                 })}
 
-                {/* Tratto live durante il disegno a mano libera */}
-                {liveBrushPreviewPath && (
-                  <path
-                    d={liveBrushPreviewPath}
-                    fill={activeColor}
-                    filter={getFilterUrl(activeTexture)}
-                  />
+                {/* ANTEPRIMA LIVE DURANTE IL DISEGNO (Macchia Blob col Cursore o Pennello Fluido) */}
+                {livePreviewData && livePreviewData.pathData && (
+                  <g data-ui-overlay="true">
+                    <path
+                      d={livePreviewData.pathData}
+                      fill={activeColor}
+                      fillOpacity={livePreviewData.isBlob ? 0.85 : 0.95}
+                      stroke={livePreviewData.isBlob ? '#0D66D0' : undefined}
+                      strokeWidth={livePreviewData.isBlob ? 2.5 : undefined}
+                      strokeDasharray={
+                        livePreviewData.isBlob && blobMode === 'freeform-lasso'
+                          ? '8 5'
+                          : undefined
+                      }
+                      filter={getFilterUrl(activeTexture)}
+                    />
+                    {livePreviewData.isBlob &&
+                      livePreviewData.controlPoints.map((pt, idx) => (
+                        <circle
+                          key={idx}
+                          cx={pt.x}
+                          cy={pt.y}
+                          r={5}
+                          fill="#FFFFFF"
+                          stroke="#0D66D0"
+                          strokeWidth={2}
+                        />
+                      ))}
+                  </g>
                 )}
 
-                {/* Box di anteprima durante creazione Auto-Blob o Wavy Checkerboard */}
+                {/* ANTEPRIMA TRACCIATO PENNA BÉZIER (P) IN CORSO */}
+                {activeTool === 'pen' && penDraftPoints.length > 0 && (
+                  <g data-ui-overlay="true">
+                    <path
+                      d={
+                        rebuildPathFromControlPoints(
+                          [...penDraftPoints, cursorCoords],
+                          false
+                        ).pathData
+                      }
+                      fill={activeColor}
+                      fillOpacity={0.2}
+                      stroke="#0D66D0"
+                      strokeWidth={3}
+                      strokeDasharray="6 4"
+                    />
+                    {penDraftPoints.map((pt, idx) => (
+                      <rect
+                        key={idx}
+                        x={pt.x - 7}
+                        y={pt.y - 7}
+                        width={14}
+                        height={14}
+                        fill={idx === 0 ? '#FF9A00' : '#FFFFFF'}
+                        stroke="#0D66D0"
+                        strokeWidth={3}
+                      />
+                    ))}
+                  </g>
+                )}
+
+                {/* Box di anteprima per Forme Geometriche (M) o Wavy Checkerboard (W) */}
                 {dragBox && (
                   <rect
+                    data-ui-overlay="true"
                     x={Math.min(dragBox.startX, dragBox.currentX)}
                     y={Math.min(dragBox.startY, dragBox.currentY)}
                     width={Math.abs(dragBox.currentX - dragBox.startX)}
                     height={Math.abs(dragBox.currentY - dragBox.startY)}
                     fill={activeColor}
                     fillOpacity={0.22}
-                    stroke={activeColor}
+                    stroke="#0D66D0"
                     strokeWidth={3}
                     strokeDasharray="6 6"
                   />
@@ -1473,269 +2719,1095 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
           </div>
         </div>
 
-        {/* Colonna 3 (lg:col-span-3): Sistema a Livelli (Z-Index), Proprietà Elemento & Clipboard */}
-        <div className="lg:col-span-3 space-y-4">
-          {/* Inspector Elemento Selezionato */}
-          {selectedElement && (
-            <div className="bg-[#F4ECE1] border border-[#1A2B4C]/15 rounded-xl p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold uppercase tracking-wider text-[#B85B43]">
-                  Elemento Selezionato
-                </span>
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setClipboard((prev) => [
-                        { ...selectedElement, id: `clip-${Date.now()}` },
-                        ...prev.slice(0, 7),
-                      ]);
-                      notify('Copiato negli appunti');
-                    }}
-                    title="Copia (Ctrl+C)"
-                    aria-label="Copia elemento selezionato"
-                    className="p-1.5 bg-[#EADDCD] rounded text-[#1A2B4C] hover:bg-[#1A2B4C] hover:text-[#EADDCD]"
-                  >
-                    <Copy className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => pasteFromClipboard(selectedElement)}
-                    title="Duplica / Incolla (Ctrl+V)"
-                    aria-label="Duplica elemento selezionato"
-                    className="p-1.5 bg-[#EADDCD] rounded text-[#1A2B4C] hover:bg-[#1A2B4C] hover:text-[#EADDCD]"
-                  >
-                    <ClipboardPaste className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setElements((prev) => prev.filter((el) => el.id !== selectedElement.id));
-                      setSelectedId(null);
-                    }}
-                    title="Elimina livello"
-                    aria-label="Elimina elemento selezionato"
-                    className="p-1.5 bg-[#B85B43]/15 rounded text-[#B85B43] hover:bg-[#B85B43] hover:text-[#EADDCD]"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-
-              {selectedElement.type === 'textured-text' && !selectedElement.isHandDrawnText && (
-                <div>
-                  <label className="block text-[11px] font-semibold text-[#1A2B4C] mb-1">
-                    Modifica Testo Livello
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={selectedElement.textContent || ''}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setElements((prev) =>
-                        prev.map((el) =>
-                          el.id === selectedElement.id ? { ...el, textContent: val } : el
-                        )
-                      );
-                    }}
-                    className="w-full px-2.5 py-1.5 text-xs bg-[#EADDCD] border border-[#1A2B4C]/20 rounded text-[#1A2B4C]"
-                  />
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-[11px] font-semibold text-[#1A2B4C]">
-                    Rotazione ({selectedElement.rotation}°)
-                  </label>
-                  <input
-                    type="range"
-                    min={-45}
-                    max={45}
-                    value={selectedElement.rotation}
-                    onChange={(e) => {
-                      const rot = Number(e.target.value);
-                      setElements((prev) =>
-                        prev.map((el) =>
-                          el.id === selectedElement.id ? { ...el, rotation: rot } : el
-                        )
-                      );
-                    }}
-                    className="w-full accent-[#B85B43]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-semibold text-[#1A2B4C]">
-                    Opacità ({Math.round(selectedElement.opacity * 100)}%)
-                  </label>
-                  <input
-                    type="range"
-                    min={0.2}
-                    max={1}
-                    step={0.05}
-                    value={selectedElement.opacity}
-                    onChange={(e) => {
-                      const op = Number(e.target.value);
-                      setElements((prev) =>
-                        prev.map((el) =>
-                          el.id === selectedElement.id ? { ...el, opacity: op } : el
-                        )
-                      );
-                    }}
-                    className="w-full accent-[#B85B43]"
-                  />
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Pannello Sistema a Livelli (Z-Index) */}
-          <div className="bg-[#F4ECE1] border border-[#1A2B4C]/15 rounded-xl p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5">
-                <Layers className="w-4 h-4 text-[#1A2B4C]" />
-                <h2 className="text-xs font-bold uppercase tracking-wider text-[#1A2B4C]">
-                  Livelli Vettoriali (Z-Index)
-                </h2>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setElements([]);
-                  setSelectedId(null);
-                }}
-                className="flex items-center gap-1 text-[11px] font-semibold text-[#B85B43] hover:underline"
-              >
-                <RotateCcw className="w-3 h-3" />
-                <span>Svuota</span>
-              </button>
-            </div>
-
-            <div className="max-h-60 overflow-y-auto space-y-1.5 pr-1">
-              {[...sortedElements].reverse().map((el) => {
-                const isSel = el.id === selectedId;
-                return (
-                  <div
-                    key={el.id}
-                    onClick={() => {
-                      setSelectedId(el.id);
-                      setActiveTool('select');
-                    }}
-                    className={`flex items-center justify-between px-2.5 py-2 rounded-lg border text-xs cursor-pointer transition-colors ${
-                      isSel
-                        ? 'bg-[#1A2B4C] text-[#EADDCD] border-[#1A2B4C]'
-                        : 'bg-[#EADDCD]/70 text-[#1A2B4C] border-[#1A2B4C]/15 hover:bg-[#EADDCD]'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span
-                        className="w-3.5 h-3.5 rounded-full border border-white/40 shrink-0"
-                        style={{ backgroundColor: el.color }}
-                      />
-                      <span className="truncate font-medium">{el.name}</span>
-                    </div>
-
-                    <div
-                      className="flex items-center gap-1 shrink-0 ml-2"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => moveLayerZIndex(el.id, 'up')}
-                        aria-label={`Porta avanti ${el.name}`}
-                        className="p-1 hover:opacity-75"
-                      >
-                        <ArrowUp className="w-3 h-3" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => moveLayerZIndex(el.id, 'down')}
-                        aria-label={`Porta indietro ${el.name}`}
-                        className="p-1 hover:opacity-75"
-                      >
-                        <ArrowDown className="w-3 h-3" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setElements((prev) =>
-                            prev.map((item) =>
-                              item.id === el.id ? { ...item, visible: !item.visible } : item
-                            )
-                          )
-                        }
-                        aria-label={`Mostra o nascondi ${el.name}`}
-                        className="p-1 hover:opacity-75"
-                      >
-                        {el.visible ? (
-                          <Eye className="w-3 h-3" />
-                        ) : (
-                          <EyeOff className="w-3 h-3 opacity-50" />
-                        )}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setElements((prev) =>
-                            prev.map((item) =>
-                              item.id === el.id ? { ...item, locked: !item.locked } : item
-                            )
-                          )
-                        }
-                        aria-label={`Blocca o sblocca ${el.name}`}
-                        className="p-1 hover:opacity-75"
-                      >
-                        {el.locked ? (
-                          <Lock className="w-3 h-3 text-[#D4A373]" />
-                        ) : (
-                          <Unlock className="w-3 h-3 opacity-50" />
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-
-              {sortedElements.length === 0 && (
-                <p className="text-xs text-[#1A2B4C]/60 py-4 text-center">
-                  Nessun livello sul canvas. Disegna col pennello o incolla un asset dalla Clipboard.
-                </p>
-              )}
-            </div>
+        {/* 3. RIGHT DOCK STUDIO PANELS (Stile Adobe Illustrator: Carattere, Proprietà/Tracciati, Livelli) */}
+        <div
+          data-testid="illustrator-right-dock"
+          className={`w-full lg:w-[370px] border-t lg:border-t-0 lg:border-l flex flex-col shrink-0 ${panelBg}`}
+        >
+          {/* Tab Header del Pannello Destro */}
+          <div className="grid grid-cols-3 border-b border-white/10 text-xs font-bold">
+            <button
+              type="button"
+              data-testid="tab-character-panel"
+              onClick={() => setRightDockTab('character')}
+              className={`py-2.5 px-2 flex items-center justify-center gap-1.5 border-b-2 transition-colors ${
+                rightDockTab === 'character'
+                  ? 'border-[#FF9A00] text-[#FF9A00] bg-white/5'
+                  : 'border-transparent opacity-70 hover:opacity-100'
+              }`}
+            >
+              <Type className="w-3.5 h-3.5" />
+              <span>Carattere</span>
+            </button>
+            <button
+              type="button"
+              data-testid="tab-properties-panel"
+              onClick={() => setRightDockTab('properties')}
+              className={`py-2.5 px-2 flex items-center justify-center gap-1.5 border-b-2 transition-colors ${
+                rightDockTab === 'properties'
+                  ? 'border-[#FF9A00] text-[#FF9A00] bg-white/5'
+                  : 'border-transparent opacity-70 hover:opacity-100'
+              }`}
+            >
+              <Combine className="w-3.5 h-3.5" />
+              <span>Proprietà &amp; Blob</span>
+            </button>
+            <button
+              type="button"
+              data-testid="tab-layers-panel"
+              onClick={() => setRightDockTab('layers')}
+              className={`py-2.5 px-2 flex items-center justify-center gap-1.5 border-b-2 transition-colors ${
+                rightDockTab === 'layers'
+                  ? 'border-[#FF9A00] text-[#FF9A00] bg-white/5'
+                  : 'border-transparent opacity-70 hover:opacity-100'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>Livelli ({elements.length})</span>
+            </button>
           </div>
 
-          {/* Clipboard Vettoriale & Asset Pre-caricati dal Ponte Lab Manager + Partner */}
-          <div className="bg-[#F4ECE1] border border-[#1A2B4C]/15 rounded-xl p-4 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold uppercase tracking-wider text-[#4A6B53]">
-                Clipboard &amp; Asset Pronti (Ctrl+V)
-              </span>
-              <span className="text-[11px] font-mono tabular-nums text-[#1A2B4C]/60">
-                {clipboard.length} item
-              </span>
-            </div>
-            <p className="text-[11px] text-[#1A2B4C]/70">
-              Tocca un elemento qui sotto (inclusi i kit Partner caricati) per incollarlo sul Canvas.
-            </p>
-            <div className="space-y-1.5">
-              {clipboard.map((clipItem) => (
-                <button
-                  key={clipItem.id}
-                  type="button"
-                  onClick={() => pasteFromClipboard(clipItem)}
-                  className="w-full flex items-center justify-between px-3 py-2 bg-[#EADDCD] hover:bg-[#D4A373]/30 border border-[#1A2B4C]/15 rounded-lg text-xs font-semibold text-[#1A2B4C] transition-colors"
-                >
-                  <div className="flex items-center gap-2 truncate">
-                    <span
-                      className="w-3 h-3 rounded-full shrink-0"
-                      style={{ backgroundColor: clipItem.secondaryColor || clipItem.color }}
-                    />
-                    <span className="truncate">{clipItem.name}</span>
+          {/* Contenuto Scrollabile del Pannello Attivo */}
+          <div className="p-4 space-y-4 overflow-y-auto max-h-[680px]">
+            {/* ==================== TAB 1: CARATTERE & CASELLA DI TESTO (SOLO MONTSERRAT E AKENA OTOS) ==================== */}
+            {rightDockTab === 'character' && (
+              <div data-testid="character-studio-panel" className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-[#FF9A00]">
+                      Caselle di Testo &amp; Tipografia
+                    </h3>
+                    <p className={`text-[11px] ${mutedText}`}>
+                      Due sole famiglie ufficiali: Montserrat &amp; Akena Otos
+                    </p>
                   </div>
-                  <span className="text-[11px] text-[#B85B43] shrink-0 ml-2">+ Incolla</span>
-                </button>
-              ))}
-            </div>
+                  <button
+                    type="button"
+                    data-testid="add-textbox-btn"
+                    onClick={() =>
+                      createNewTextBoxAt(
+                        Math.round(canvasSize.width / 2),
+                        Math.round(canvasSize.height / 2),
+                        540
+                      )
+                    }
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0D66D0] text-white text-xs font-bold hover:bg-[#0952a8] transition-colors shadow"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>+ Casella di Testo</span>
+                  </button>
+                </div>
+
+                {/* Selettore Esclusivo delle 2 Famiglie Font: Montserrat vs Akena Otos */}
+                <div className="space-y-2">
+                  <span className="block text-[11px] font-bold uppercase tracking-wider opacity-80">
+                    1. Famiglia Font (Esclusiva 2 Font)
+                  </span>
+                  <div className="grid grid-cols-2 gap-2">
+                    {BUILDER_FONT_FAMILIES.map((fam) => {
+                      const currentFam =
+                        selectedElement?.type === 'textured-text' && selectedElement.fontFamily
+                          ? selectedElement.fontFamily
+                          : activeFontFamily;
+                      const isSel = currentFam === fam.id;
+                      return (
+                        <button
+                          key={fam.id}
+                          type="button"
+                          data-testid={`font-family-btn-${fam.id === 'Montserrat' ? 'montserrat' : 'akena'}`}
+                          onClick={() => {
+                            setActiveFontFamily(fam.id);
+                            if (selectedElement?.type === 'textured-text') {
+                              updateSelectedTextProperty({
+                                fontFamily: fam.id,
+                                fontStyle:
+                                  fam.id === 'Akena Otos' ? 'editorial-serif' : 'craft-rounded',
+                              });
+                            }
+                          }}
+                          className={`p-2.5 rounded-lg border text-left transition-all ${
+                            isSel
+                              ? 'bg-[#0D66D0] text-white border-[#3B9EFF] shadow'
+                              : `${inputBg} hover:opacity-90`
+                          }`}
+                        >
+                          <div
+                            className="text-sm font-bold truncate"
+                            style={{
+                              fontFamily:
+                                fam.id === 'Montserrat'
+                                  ? '"Montserrat", sans-serif'
+                                  : '"Akena Otos", "Fraunces", Georgia, serif',
+                            }}
+                          >
+                            {fam.label}
+                          </div>
+                          <div className="text-[10px] opacity-80 leading-tight mt-0.5">
+                            18 Declinazioni
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Selettore Tutte le 18 Declinazioni (100 Thin .. 900 Black, Normale & Italic) */}
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="font-declination-select"
+                    className="block text-[11px] font-bold uppercase tracking-wider opacity-80"
+                  >
+                    2. Declinazione ({activeFontFamily} · 18 Varianti)
+                  </label>
+                  <select
+                    id="font-declination-select"
+                    data-testid="font-declination-select"
+                    value={
+                      selectedElement?.type === 'textured-text' && selectedElement.fontWeight
+                        ? `${selectedElement.fontWeight}-${
+                            selectedElement.fontItalic ? 'italic' : 'normal'
+                          }`
+                        : `${activeFontWeight}-${activeFontItalic ? 'italic' : 'normal'}`
+                    }
+                    onChange={(e) => {
+                      const found = FONT_DECLINATIONS.find((d) => d.id === e.target.value);
+                      if (!found) return;
+                      setActiveFontWeight(found.weight);
+                      setActiveFontItalic(found.italic);
+                      if (selectedElement?.type === 'textured-text') {
+                        updateSelectedTextProperty({
+                          fontFamily: selectedElement.fontFamily || activeFontFamily,
+                          fontWeight: found.weight,
+                          fontItalic: found.italic,
+                        });
+                      }
+                    }}
+                    className={`w-full px-3 py-2 rounded-lg border text-xs font-semibold ${inputBg}`}
+                  >
+                    {FONT_DECLINATIONS.map((decl) => (
+                      <option
+                        key={decl.id}
+                        value={decl.id}
+                        className="bg-[#252526] text-white"
+                      >
+                        {activeFontFamily} — {decl.label}
+                      </option>
+                    ))}
+                  </select>
+
+                  {/* Griglia Rapida Pesi 100–900 + Toggle Italic */}
+                  <div className="grid grid-cols-5 gap-1 pt-1">
+                    {([100, 200, 300, 400, 500, 600, 700, 800, 900] as BuilderFontWeight[]).map(
+                      (w) => {
+                        const curW =
+                          selectedElement?.type === 'textured-text' && selectedElement.fontWeight
+                            ? selectedElement.fontWeight
+                            : activeFontWeight;
+                        return (
+                          <button
+                            key={w}
+                            type="button"
+                            onClick={() => {
+                              setActiveFontWeight(w);
+                              if (selectedElement?.type === 'textured-text') {
+                                updateSelectedTextProperty({
+                                  fontFamily: selectedElement.fontFamily || activeFontFamily,
+                                  fontWeight: w,
+                                });
+                              }
+                            }}
+                            className={`py-1 rounded text-[11px] font-mono font-semibold border ${
+                              curW === w
+                                ? 'bg-[#FF9A00] text-black border-[#FF9A00]'
+                                : `${inputBg} opacity-80 hover:opacity-100`
+                            }`}
+                          >
+                            {w}
+                          </button>
+                        );
+                      }
+                    )}
+                    <button
+                      type="button"
+                      data-testid="font-italic-toggle"
+                      onClick={() => {
+                        const nextIt =
+                          selectedElement?.type === 'textured-text'
+                            ? !selectedElement.fontItalic
+                            : !activeFontItalic;
+                        setActiveFontItalic(nextIt);
+                        if (selectedElement?.type === 'textured-text') {
+                          updateSelectedTextProperty({
+                            fontFamily: selectedElement.fontFamily || activeFontFamily,
+                            fontItalic: nextIt,
+                          });
+                        }
+                      }}
+                      className={`py-1 rounded text-[11px] italic font-serif font-bold border ${
+                        (
+                          selectedElement?.type === 'textured-text'
+                            ? selectedElement.fontItalic
+                            : activeFontItalic
+                        )
+                          ? 'bg-[#FF9A00] text-black border-[#FF9A00]'
+                          : `${inputBg} opacity-80 hover:opacity-100`
+                      }`}
+                    >
+                      Italic
+                    </button>
+                  </div>
+                </div>
+
+                {/* Caricamento File Font Originale (.OTF / .TTF / .WOFF2) per Akena Otos o Montserrat */}
+                <div className={`p-2.5 rounded-lg border space-y-1.5 ${inputBg}`}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold">
+                      File Font {activeFontFamily} (.OTF / .TTF)
+                    </span>
+                    {customLoadedFonts[activeFontFamily] ? (
+                      <span className="flex items-center gap-1 text-[10px] text-[#4A6B53] font-semibold">
+                        <Check className="w-3 h-3" />
+                        {customLoadedFonts[activeFontFamily]}
+                      </span>
+                    ) : (
+                      <span className={`text-[10px] ${mutedText}`}>Predefinito integrato</span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => fontFileInputRef.current?.click()}
+                    className="w-full py-1.5 px-2.5 rounded bg-white/10 hover:bg-white/15 border border-white/15 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-[#FF9A00]" />
+                    <span>Carica file .OTF / .TTF per {activeFontFamily}</span>
+                  </button>
+                </div>
+
+                {/* Editor Testo Contenuto Casella */}
+                {selectedElement?.type === 'textured-text' && !selectedElement.isHandDrawnText ? (
+                  <div className="space-y-3 pt-2 border-t border-white/10">
+                    <div>
+                      <label
+                        htmlFor="textbox-content-textarea"
+                        className="block text-[11px] font-bold uppercase tracking-wider mb-1"
+                      >
+                        Testo della Casella Selezionata
+                      </label>
+                      <textarea
+                        id="textbox-content-textarea"
+                        data-testid="textbox-content-textarea"
+                        rows={3}
+                        value={selectedElement.textContent || ''}
+                        onChange={(e) =>
+                          updateSelectedTextProperty({ textContent: e.target.value })
+                        }
+                        className={`w-full px-2.5 py-2 text-xs rounded-lg border ${inputBg}`}
+                      />
+                    </div>
+
+                    {/* Controlli Parametrici Adobe Illustrator Character Panel */}
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
+                          Corpo Font ({selectedElement.fontSize || 48} pt)
+                        </label>
+                        <input
+                          type="number"
+                          min={12}
+                          max={220}
+                          value={selectedElement.fontSize || 48}
+                          onChange={(e) => {
+                            const v = Math.max(12, Number(e.target.value) || 48);
+                            setActiveFontSize(v);
+                            updateSelectedTextProperty({ fontSize: v });
+                          }}
+                          className={`w-full px-2.5 py-1.5 rounded border text-xs font-mono ${inputBg}`}
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
+                          Larghezza Box ({selectedElement.textBoxWidth || selectedElement.width} px)
+                        </label>
+                        <input
+                          type="number"
+                          min={160}
+                          max={1040}
+                          step={20}
+                          value={selectedElement.textBoxWidth || selectedElement.width || 520}
+                          onChange={(e) => {
+                            const w = Math.max(160, Number(e.target.value) || 520);
+                            updateSelectedTextProperty({ textBoxWidth: w });
+                          }}
+                          className={`w-full px-2.5 py-1.5 rounded border text-xs font-mono ${inputBg}`}
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
+                          Interlinea ({(selectedElement.lineHeight || 1.2).toFixed(2)})
+                        </label>
+                        <input
+                          type="range"
+                          min={0.85}
+                          max={2.2}
+                          step={0.05}
+                          value={selectedElement.lineHeight || 1.2}
+                          onChange={(e) => {
+                            const lh = Number(e.target.value);
+                            setActiveLineHeight(lh);
+                            updateSelectedTextProperty({ lineHeight: lh });
+                          }}
+                          className="w-full accent-[#FF9A00]"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
+                          Tracking ({Math.round((selectedElement.letterSpacing || 0) * 1000)})
+                        </label>
+                        <input
+                          type="range"
+                          min={-0.06}
+                          max={0.35}
+                          step={0.01}
+                          value={selectedElement.letterSpacing || 0}
+                          onChange={(e) => {
+                            const ls = Number(e.target.value);
+                            setActiveLetterSpacing(ls);
+                            updateSelectedTextProperty({ letterSpacing: ls });
+                          }}
+                          className="w-full accent-[#FF9A00]"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Allineamento Paragrafo & Trasformazione Maiuscole/Minuscole */}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className={`flex items-center rounded border p-0.5 ${inputBg}`}>
+                        <button
+                          type="button"
+                          onClick={() => updateSelectedTextProperty({ textAlign: 'left' })}
+                          title="Allinea testo a sinistra"
+                          className={`p-1.5 rounded ${
+                            selectedElement.textAlign === 'left'
+                              ? 'bg-[#0D66D0] text-white'
+                              : 'hover:bg-white/10'
+                          }`}
+                        >
+                          <AlignLeft className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => updateSelectedTextProperty({ textAlign: 'center' })}
+                          title="Centra testo"
+                          className={`p-1.5 rounded ${
+                            (selectedElement.textAlign || 'center') === 'center'
+                              ? 'bg-[#0D66D0] text-white'
+                              : 'hover:bg-white/10'
+                          }`}
+                        >
+                          <AlignCenter className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => updateSelectedTextProperty({ textAlign: 'right' })}
+                          title="Allinea testo a destra"
+                          className={`p-1.5 rounded ${
+                            selectedElement.textAlign === 'right'
+                              ? 'bg-[#0D66D0] text-white'
+                              : 'hover:bg-white/10'
+                          }`}
+                        >
+                          <AlignRight className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      <div className={`flex items-center rounded border p-0.5 text-[11px] font-mono ${inputBg}`}>
+                        <button
+                          type="button"
+                          onClick={() => updateSelectedTextProperty({ textTransform: 'none' })}
+                          className={`px-2 py-1 rounded ${
+                            (selectedElement.textTransform || 'none') === 'none'
+                              ? 'bg-[#0D66D0] text-white'
+                              : ''
+                          }`}
+                        >
+                          Aa
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => updateSelectedTextProperty({ textTransform: 'uppercase' })}
+                          className={`px-2 py-1 rounded ${
+                            selectedElement.textTransform === 'uppercase'
+                              ? 'bg-[#0D66D0] text-white'
+                              : ''
+                          }`}
+                        >
+                          AA
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => updateSelectedTextProperty({ textTransform: 'lowercase' })}
+                          className={`px-2 py-1 rounded ${
+                            selectedElement.textTransform === 'lowercase'
+                              ? 'bg-[#0D66D0] text-white'
+                              : ''
+                          }`}
+                        >
+                          aa
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className={`p-3 rounded-lg border text-xs ${inputBg}`}>
+                    Seleziona un livello di testo sulla tavola oppure clicca{' '}
+                    <strong>&ldquo;+ Casella di Testo&rdquo;</strong> (tasto{' '}
+                    <kbd className="px-1.5 py-0.5 rounded bg-black/30 font-mono">T</kbd>) per
+                    scrivere con <strong>Montserrat</strong> o <strong>Akena Otos</strong>.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ==================== TAB 2: PROPRIETÀ, MACCHIA BLOB COL CURSORE & PATHFINDER ==================== */}
+            {rightDockTab === 'properties' && (
+              <div data-testid="properties-studio-panel" className="space-y-4">
+                {/* Box Dedicato: Impostazioni Macchia Blob col Cursore */}
+                <div className={`p-3 rounded-lg border space-y-2.5 ${inputBg}`}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-[#FF9A00] flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>Macchia Blob col Cursore (Shift+B)</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTool('blob')}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                        activeTool === 'blob'
+                          ? 'bg-[#B85B43] text-white'
+                          : 'bg-white/10 hover:bg-white/20'
+                      }`}
+                    >
+                      {activeTool === 'blob' ? 'Strumento Attivo' : 'Attiva Ora'}
+                    </button>
+                  </div>
+                  <p className={`text-[11px] leading-snug ${mutedText}`}>
+                    Disegna qualsiasi contorno col cursore senza vincolo di rettangolo:
+                  </p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTool('blob');
+                        setBlobMode('freeform-lasso');
+                      }}
+                      className={`p-2 rounded border text-left text-[11px] font-semibold ${
+                        blobMode === 'freeform-lasso'
+                          ? 'bg-[#B85B43] text-white border-[#B85B43]'
+                          : 'border-white/15 hover:bg-white/5'
+                      }`}
+                    >
+                      <div>1. Lazo Forma Chiusa</div>
+                      <div className="text-[10px] opacity-80 font-normal">
+                        Chiude il perimetro disegnato
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTool('blob');
+                        setBlobMode('blob-brush-merge');
+                      }}
+                      className={`p-2 rounded border text-left text-[11px] font-semibold ${
+                        blobMode === 'blob-brush-merge'
+                          ? 'bg-[#B85B43] text-white border-[#B85B43]'
+                          : 'border-white/15 hover:bg-white/5'
+                      }`}
+                    >
+                      <div>2. Pennello Blob Unione</div>
+                      <div className="text-[10px] opacity-80 font-normal">
+                        Fonde tratti dello stesso colore
+                      </div>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 pt-1">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
+                        Calibro Tratto ({brushSize} px)
+                      </label>
+                      <input
+                        type="range"
+                        min={8}
+                        max={80}
+                        value={brushSize}
+                        onChange={(e) => setBrushSize(Number(e.target.value))}
+                        className="w-full accent-[#B85B43]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
+                        Organicità ({Math.round(blobRoughness * 100)}%)
+                      </label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={0.45}
+                        step={0.02}
+                        value={blobRoughness}
+                        onChange={(e) => setBlobRoughness(Number(e.target.value))}
+                        className="w-full accent-[#B85B43]"
+                      />
+                    </div>
+                  </div>
+
+                  {blobMode === 'blob-brush-merge' && (
+                    <label className="flex items-center gap-2 text-[11px] cursor-pointer pt-1">
+                      <input
+                        type="checkbox"
+                        checked={mergeBlobBrushWithSameColor}
+                        onChange={(e) => setMergeBlobBrushWithSameColor(e.target.checked)}
+                        className="accent-[#B85B43]"
+                      />
+                      <span>Unisci automaticamente alle macchie dello stesso colore</span>
+                    </label>
+                  )}
+                </div>
+
+                {/* Selettore Forme Geometriche (M) e Timbri (S) */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div className={`p-2.5 rounded-lg border space-y-1.5 ${inputBg}`}>
+                    <span className="block text-[10px] font-bold uppercase opacity-80">
+                      Forma Vettoriale (M)
+                    </span>
+                    <select
+                      value={activeShapeKind}
+                      onChange={(e) => {
+                        setActiveShapeKind(e.target.value as ShapePrimitiveKind);
+                        setActiveTool('shape');
+                      }}
+                      className="w-full bg-transparent text-xs font-semibold focus:outline-none"
+                    >
+                      {SHAPE_CATALOG.map((sh) => (
+                        <option key={sh.id} value={sh.id} className="bg-[#252526] text-white">
+                          {sh.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className={`p-2.5 rounded-lg border space-y-1.5 ${inputBg}`}>
+                    <span className="block text-[10px] font-bold uppercase opacity-80">
+                      Timbro Brand (S)
+                    </span>
+                    <select
+                      value={activeStamp}
+                      onChange={(e) => {
+                        setActiveStamp(e.target.value as StampKind);
+                        setActiveTool('stamp');
+                      }}
+                      className="w-full bg-transparent text-xs font-semibold focus:outline-none"
+                    >
+                      {STAMP_CATALOG.map((st) => (
+                        <option key={st.id} value={st.id} className="bg-[#252526] text-white">
+                          {st.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Riempimento (Fill) & Traccia (Stroke) */}
+                <div className="space-y-2">
+                  <span className="block text-[11px] font-bold uppercase tracking-wider opacity-80">
+                    Aspetto: Riempimento (Fill) &amp; Traccia (Stroke)
+                  </span>
+                  <div className="grid grid-cols-5 gap-1.5">
+                    {BRAND_PALETTE.map((swatch) => (
+                      <button
+                        key={swatch.id}
+                        type="button"
+                        onClick={() => {
+                          setActiveColor(swatch.hex);
+                          if (selectedElement && !selectedElement.locked) {
+                            commitElementsChange((prev) =>
+                              prev.map((el) =>
+                                el.id === selectedElement.id ? { ...el, color: swatch.hex } : el
+                              )
+                            );
+                          }
+                        }}
+                        className={`p-1.5 rounded-lg border flex flex-col items-center gap-1 ${
+                          (selectedElement?.color || activeColor) === swatch.hex
+                            ? 'border-[#FF9A00] ring-1 ring-[#FF9A00] bg-white/10'
+                            : 'border-white/15'
+                        }`}
+                      >
+                        <span
+                          className="w-5 h-5 rounded-full border border-black/30"
+                          style={{ backgroundColor: swatch.hex }}
+                        />
+                        <span className="text-[9px] font-mono">{swatch.hex}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Spessore Traccia & Tratteggio */}
+                  <div className="grid grid-cols-2 gap-2 pt-1">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
+                        Spessore Traccia ({selectedElement?.strokeWidth ?? activeStrokeWidth} pt)
+                      </label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={28}
+                        value={selectedElement?.strokeWidth ?? activeStrokeWidth}
+                        onChange={(e) => {
+                          const sw = Number(e.target.value);
+                          setActiveStrokeWidth(sw);
+                          const sCol =
+                            activeStrokeColor === 'none' && sw > 0
+                              ? '#1A2B4C'
+                              : activeStrokeColor;
+                          setActiveStrokeColor(sCol);
+                          if (selectedElement && !selectedElement.locked) {
+                            commitElementsChange((prev) =>
+                              prev.map((el) =>
+                                el.id === selectedElement.id
+                                  ? {
+                                      ...el,
+                                      strokeWidth: sw,
+                                      strokeColor:
+                                        sw > 0 && (!el.strokeColor || el.strokeColor === 'none')
+                                          ? '#1A2B4C'
+                                          : el.strokeColor,
+                                    }
+                                  : el
+                              )
+                            );
+                          }
+                        }}
+                        className="w-full accent-[#0D66D0]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
+                        Stile Linea
+                      </label>
+                      <select
+                        value={selectedElement?.strokeDasharray ?? activeStrokeDash}
+                        onChange={(e) => {
+                          const dash = e.target.value;
+                          setActiveStrokeDash(dash);
+                          if (selectedElement && !selectedElement.locked) {
+                            commitElementsChange((prev) =>
+                              prev.map((el) =>
+                                el.id === selectedElement.id
+                                  ? { ...el, strokeDasharray: dash }
+                                  : el
+                              )
+                            );
+                          }
+                        }}
+                        className={`w-full px-2 py-1.5 rounded border text-xs ${inputBg}`}
+                      >
+                        <option value="">Continua</option>
+                        <option value="12 8">Tratteggiata</option>
+                        <option value="4 8">Punteggiata</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Pannello Trasforma & Pathfinder per l'elemento selezionato */}
+                {selectedElement && (
+                  <div className="space-y-3 pt-2 border-t border-white/10">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase text-[#3B9EFF]">
+                        Trasforma &amp; Pathfinder
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            commitElementsChange((prev) =>
+                              prev.map((el) =>
+                                el.id === selectedElement.id
+                                  ? { ...el, flipX: !el.flipX }
+                                  : el
+                              )
+                            )
+                          }
+                          title="Rifletti Orizzontalmente"
+                          className={`p-1.5 rounded border ${inputBg}`}
+                        >
+                          <FlipHorizontal className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            commitElementsChange((prev) =>
+                              prev.map((el) =>
+                                el.id === selectedElement.id
+                                  ? { ...el, flipY: !el.flipY }
+                                  : el
+                              )
+                            )
+                          }
+                          title="Rifletti Verticalmente"
+                          className={`p-1.5 rounded border ${inputBg}`}
+                        >
+                          <FlipVertical className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => pasteFromClipboard(selectedElement)}
+                          title="Duplica livello (Ctrl+V)"
+                          className={`p-1.5 rounded border ${inputBg}`}
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            commitElementsChange((prev) =>
+                              prev.filter((el) => el.id !== selectedElement.id)
+                            );
+                            setSelectedId(null);
+                          }}
+                          title="Elimina livello"
+                          className="p-1.5 rounded bg-[#B85B43]/20 text-[#B85B43] hover:bg-[#B85B43] hover:text-white"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Coordinate X, Y, Rotazione, Opacità */}
+                    <div className="grid grid-cols-4 gap-1.5 text-xs font-mono">
+                      <div className={`p-1.5 rounded border ${inputBg}`}>
+                        <span className="block text-[9px] opacity-60">X</span>
+                        <input
+                          type="number"
+                          value={Math.round(selectedElement.x)}
+                          onChange={(e) => {
+                            const nx = Number(e.target.value) || 0;
+                            const dx = nx - selectedElement.x;
+                            commitElementsChange((prev) =>
+                              prev.map((el) =>
+                                el.id === selectedElement.id
+                                  ? translateVectorElement(el, dx, 0)
+                                  : el
+                              )
+                            );
+                          }}
+                          className="w-full bg-transparent focus:outline-none"
+                        />
+                      </div>
+                      <div className={`p-1.5 rounded border ${inputBg}`}>
+                        <span className="block text-[9px] opacity-60">Y</span>
+                        <input
+                          type="number"
+                          value={Math.round(selectedElement.y)}
+                          onChange={(e) => {
+                            const ny = Number(e.target.value) || 0;
+                            const dy = ny - selectedElement.y;
+                            commitElementsChange((prev) =>
+                              prev.map((el) =>
+                                el.id === selectedElement.id
+                                  ? translateVectorElement(el, 0, dy)
+                                  : el
+                              )
+                            );
+                          }}
+                          className="w-full bg-transparent focus:outline-none"
+                        />
+                      </div>
+                      <div className={`p-1.5 rounded border ${inputBg}`}>
+                        <span className="block text-[9px] opacity-60">Rot°</span>
+                        <input
+                          type="number"
+                          min={-180}
+                          max={180}
+                          value={selectedElement.rotation}
+                          onChange={(e) => {
+                            const rot = Number(e.target.value) || 0;
+                            commitElementsChange((prev) =>
+                              prev.map((el) =>
+                                el.id === selectedElement.id ? { ...el, rotation: rot } : el
+                              )
+                            );
+                          }}
+                          className="w-full bg-transparent focus:outline-none"
+                        />
+                      </div>
+                      <div className={`p-1.5 rounded border ${inputBg}`}>
+                        <span className="block text-[9px] opacity-60">Opac%</span>
+                        <input
+                          type="number"
+                          min={10}
+                          max={100}
+                          step={5}
+                          value={Math.round(selectedElement.opacity * 100)}
+                          onChange={(e) => {
+                            const op = Math.min(1, Math.max(0.1, Number(e.target.value) / 100));
+                            commitElementsChange((prev) =>
+                              prev.map((el) =>
+                                el.id === selectedElement.id ? { ...el, opacity: op } : el
+                              )
+                            );
+                          }}
+                          className="w-full bg-transparent focus:outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Bottoni Pathfinder & Nodi */}
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={handlePathfinderUnite}
+                        className="py-1.5 px-2 rounded bg-[#0D66D0]/20 border border-[#0D66D0]/50 text-[11px] font-semibold flex items-center justify-center gap-1 hover:bg-[#0D66D0] hover:text-white transition-colors"
+                      >
+                        <Combine className="w-3.5 h-3.5" />
+                        <span>Unisci col Sottostante</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleConvertSelectedToOrganicBlob}
+                        className="py-1.5 px-2 rounded bg-[#B85B43]/20 border border-[#B85B43]/50 text-[11px] font-semibold flex items-center justify-center gap-1 hover:bg-[#B85B43] hover:text-white transition-colors"
+                      >
+                        <Crosshair className="w-3.5 h-3.5" />
+                        <span>Converti in Nodi Blob</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Texture & Sfondo Carta */}
+                <div className="space-y-2 pt-2 border-t border-white/10">
+                  <label
+                    htmlFor="builder-texture-select"
+                    className="block text-[10px] font-bold uppercase opacity-75"
+                  >
+                    Filtro Texture Vettoriale
+                  </label>
+                  <select
+                    id="builder-texture-select"
+                    value={selectedElement ? selectedElement.textureType : activeTexture}
+                    onChange={(e) => {
+                      const val = e.target.value as TextureFilterType;
+                      setActiveTexture(val);
+                      if (selectedElement) {
+                        updateSelectedTextProperty({ textureType: val });
+                      }
+                    }}
+                    className={`w-full px-2.5 py-1.5 rounded border text-xs font-semibold ${inputBg}`}
+                  >
+                    <option value="none">Tracciato Vettoriale Puro (Nitido)</option>
+                    <option value="rough-brush">Texture Pennellata Ruvida</option>
+                    <option value="ink-porosity">Porosità dell&apos;Inchiostro</option>
+                    <option value="cyanotype">Effetto Cianotipia Solare</option>
+                    <option value="materic-blob">Riempimento Materico Blob</option>
+                  </select>
+
+                  <div className="flex items-center justify-between pt-1">
+                    <span className="text-[10px] font-bold uppercase opacity-75">
+                      Sfondo Tavola
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      {BRAND_PALETTE.map((sw) => (
+                        <button
+                          key={sw.id}
+                          type="button"
+                          onClick={() => setBackgroundColor(sw.hex)}
+                          aria-label={`Sfondo canvas ${sw.name}`}
+                          className={`w-5 h-5 rounded border ${
+                            backgroundColor === sw.hex
+                              ? 'border-[#FF9A00] ring-2 ring-[#FF9A00]'
+                              : 'border-white/30'
+                          }`}
+                          style={{ backgroundColor: sw.hex }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ==================== TAB 3: LIVELLI Z-INDEX, PARTNER KIT & CLIPBOARD ==================== */}
+            {rightDockTab === 'layers' && (
+              <div data-testid="layers-studio-panel" className="space-y-4">
+                {/* Partner Brand Kit Selector */}
+                <div className={`p-2.5 rounded-lg border space-y-2 ${inputBg}`}>
+                  <div className="flex items-center gap-1.5">
+                    <Building2 className="w-3.5 h-3.5 text-[#B85B43]" />
+                    <label
+                      htmlFor="builder-partner-dropdown"
+                      className="text-[11px] font-bold uppercase"
+                    >
+                      Partner Brand Kit
+                    </label>
+                  </div>
+                  <select
+                    id="builder-partner-dropdown"
+                    data-testid="builder-partner-dropdown"
+                    value={selectedPartnerId}
+                    onChange={(e) => handlePartnerDropdownChange(e.target.value)}
+                    className="w-full bg-transparent text-xs font-semibold focus:outline-none"
+                  >
+                    <option value="" className="bg-[#252526] text-white">
+                      — Nessun Partner (Solo Fatti a mano) —
+                    </option>
+                    {partners.map((p) => (
+                      <option key={p.id} value={p.id} className="bg-[#252526] text-white">
+                        {p.name} ({p.logoText})
+                      </option>
+                    ))}
+                  </select>
+                  {activePartner && (
+                    <button
+                      type="button"
+                      onClick={handleInsertFullPartnerKitOnCanvas}
+                      className="w-full py-1 px-2 bg-[#B85B43] text-white rounded text-[11px] font-semibold"
+                    >
+                      + Inserisci Logo &amp; Macchia {activePartner.name}
+                    </button>
+                  )}
+                </div>
+
+                {/* Lista Livelli Vettoriali */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider opacity-80">
+                      Gerarchia Livelli (Z-Index)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        commitElementsChange(() => []);
+                        setSelectedId(null);
+                      }}
+                      className="text-[11px] font-semibold text-[#B85B43] hover:underline"
+                    >
+                      Svuota Tavola
+                    </button>
+                  </div>
+
+                  <div className="max-h-64 overflow-y-auto space-y-1 pr-1">
+                    {[...sortedElements].reverse().map((el) => {
+                      const isSel = el.id === selectedId;
+                      return (
+                        <div
+                          key={el.id}
+                          onClick={() => {
+                            setSelectedId(el.id);
+                            if (el.type === 'textured-text') {
+                              setRightDockTab('character');
+                            }
+                          }}
+                          className={`flex items-center justify-between px-2.5 py-1.5 rounded border text-xs cursor-pointer transition-colors ${
+                            isSel
+                              ? 'bg-[#0D66D0] text-white border-[#3B9EFF]'
+                              : `${inputBg} hover:opacity-90`
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span
+                              className="w-3 h-3 rounded-sm border border-white/40 shrink-0"
+                              style={{ backgroundColor: el.color }}
+                            />
+                            <span className="truncate font-medium">{el.name}</span>
+                          </div>
+                          <div
+                            className="flex items-center gap-0.5 shrink-0 ml-1"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => moveLayerZIndex(el.id, 'up')}
+                              aria-label={`Porta avanti ${el.name}`}
+                              className="p-1 hover:opacity-75"
+                            >
+                              <ArrowUp className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => moveLayerZIndex(el.id, 'down')}
+                              aria-label={`Porta indietro ${el.name}`}
+                              className="p-1 hover:opacity-75"
+                            >
+                              <ArrowDown className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                commitElementsChange((prev) =>
+                                  prev.map((item) =>
+                                    item.id === el.id
+                                      ? { ...item, visible: !item.visible }
+                                      : item
+                                  )
+                                )
+                              }
+                              aria-label={`Mostra o nascondi ${el.name}`}
+                              className="p-1 hover:opacity-75"
+                            >
+                              {el.visible ? (
+                                <Eye className="w-3 h-3" />
+                              ) : (
+                                <EyeOff className="w-3 h-3 opacity-50" />
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                commitElementsChange((prev) =>
+                                  prev.map((item) =>
+                                    item.id === el.id ? { ...item, locked: !item.locked } : item
+                                  )
+                                )
+                              }
+                              aria-label={`Blocca o sblocca ${el.name}`}
+                              className="p-1 hover:opacity-75"
+                            >
+                              {el.locked ? (
+                                <Lock className="w-3 h-3 text-[#FF9A00]" />
+                              ) : (
+                                <Unlock className="w-3 h-3 opacity-50" />
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Clipboard Vettoriale */}
+                <div className="space-y-1.5 pt-2 border-t border-white/10">
+                  <span className="block text-[11px] font-bold uppercase tracking-wider text-[#4A6B53]">
+                    Appunti &amp; Simboli Vettoriali ({clipboard.length})
+                  </span>
+                  <div className="space-y-1">
+                    {clipboard.map((clipItem) => (
+                      <button
+                        key={clipItem.id}
+                        type="button"
+                        onClick={() => pasteFromClipboard(clipItem)}
+                        className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded border text-xs font-medium ${inputBg} hover:opacity-90`}
+                      >
+                        <span className="truncate">{clipItem.name}</span>
+                        <span className="text-[10px] text-[#FF9A00] font-bold ml-2">
+                          + Incolla
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

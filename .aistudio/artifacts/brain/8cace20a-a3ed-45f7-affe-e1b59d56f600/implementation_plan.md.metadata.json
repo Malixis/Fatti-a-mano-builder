@@ -1,6 +1,6 @@
 {
-  "summary":  "Piano tecnico e architetturale per risolvere il bug di ripristino involontario delle Schede Laboratorio durante il salvataggio Cloud Firestore e garantire la persistenza automatica e multi-dispositivo di ogni locandina nel Builder Grafico (associata alla singola Scheda Laboratorio).",
-  "updatedAt":  "2026-11-10T09:18:24.528563915Z",
+  "summary":  "Piano architetturale e funzionale per trasformare il Builder Grafico in una workstation vettoriale completa ispirata ad Adobe Illustrator, con Caselle di Testo (Montserrat e Akena Otos in tutte le declinazioni + upload OTF/TTF), Macchia Blob a Mano Libera col cursore (Lazo forma chiusa + Pennello Blob unione), strumenti vettoriali professionali (Selezione Diretta Nodi, Penna Bezier, Forme, Allineamento, Elaborazione Tracciati/Pathfinder, Righelli/Griglia, Undo/Redo) e switch tra Tema Scuro Adobe Pro e Tema Beige Kraft.",
+  "updatedAt":  "2026-11-10T21:45:24.705374420Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

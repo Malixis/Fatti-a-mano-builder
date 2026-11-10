@@ -59,3 +59,22 @@
 .gsi-material-button:hover {
   box-shadow: 0 1px 2px 0 rgba(60, 64, 67, .30), 0 1px 3px 1px rgba(60, 64, 67, .15);
 }
+
+/* Famiglia tipografica Akena Otos (Display Editoriale Organico in tutte le declinazioni 100..900 Normal & Italic,
+   sovrascrivibile dinamicamente tramite FontFace API caricando il file .otf/.ttf/.woff2) */
+@font-face {
+  font-family: 'Akena Otos';
+  src: local('Akena Otos'), local('AkenaOtos'), local('Fraunces'), local('Cormorant Garamond');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Akena Otos';
+  src: local('Akena Otos Italic'), local('AkenaOtos-Italic'), local('Fraunces Italic'), local('Cormorant Garamond Italic');
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+

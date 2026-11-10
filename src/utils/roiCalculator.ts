@@ -328,11 +328,22 @@ function sanitizeVectorElementsList(elements: VectorElement[], maxItems = 80) {
     scale: Number(el.scale || 1),
     color: String(el.color || '#1A2B4C').slice(0, 16),
     secondaryColor: String(el.secondaryColor || '#B85B43').slice(0, 16),
+    strokeColor: String(el.strokeColor || 'none').slice(0, 16),
+    strokeWidth: Math.min(200, Math.max(0, Number(el.strokeWidth ?? 0))),
+    strokeDasharray: String(el.strokeDasharray || '').slice(0, 40),
+    flipX: Boolean(el.flipX ?? false),
+    flipY: Boolean(el.flipY ?? false),
     opacity: Number(el.opacity ?? 1),
     zIndex: Number(el.zIndex || 1),
     visible: Boolean(el.visible ?? true),
     locked: Boolean(el.locked ?? false),
     pathData: String(el.pathData || '').slice(0, 8000),
+    controlPoints: Array.isArray(el.controlPoints)
+      ? el.controlPoints.slice(0, 40).map((pt) => ({
+          x: Math.round(Number(pt.x) || 0),
+          y: Math.round(Number(pt.y) || 0),
+        }))
+      : [],
     subPaths: Array.isArray(el.subPaths)
       ? el.subPaths.slice(0, 12).map((sp) => ({
           d: String(sp.d || '').slice(0, 4000),
@@ -344,8 +355,18 @@ function sanitizeVectorElementsList(elements: VectorElement[], maxItems = 80) {
     textureType: el.textureType || 'none',
     textContent: String(el.textContent || '').slice(0, 800),
     fontStyle: el.fontStyle || 'editorial-serif',
+    fontFamily: el.fontFamily === 'Montserrat' ? 'Montserrat' : 'Akena Otos',
+    fontWeight: Number(el.fontWeight || 400),
+    fontItalic: Boolean(el.fontItalic ?? false),
+    letterSpacing: Number(el.letterSpacing ?? 0),
+    lineHeight: Number(el.lineHeight ?? 1.2),
+    textAlign: el.textAlign || 'center',
+    textTransform: el.textTransform || 'none',
+    textBoxWidth: Number(el.textBoxWidth || 0),
     fontSize: Number(el.fontSize || 42),
     stampKind: el.stampKind || 'seal-fatti-a-mano',
+    shapeKind: el.shapeKind || 'rect',
+    cornerRadius: Number(el.cornerRadius || 0),
     isHandDrawnText: Boolean(el.isHandDrawnText ?? false),
     partnerId: String(el.partnerId || '').slice(0, 128),
   }));

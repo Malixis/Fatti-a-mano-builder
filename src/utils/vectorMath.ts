@@ -1,7 +1,9 @@
 import getStroke from 'perfect-freehand';
 import {
+  BlobDrawMode,
   PartnerProfile,
   PointerSample,
+  ShapePrimitiveKind,
   StampKind,
   TextureFilterType,
   VectorElement,
@@ -170,6 +172,351 @@ export function closedCatmullRomToBezier(points: Array<{ x: number; y: number }>
     d += ` C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)}, ${cp2x.toFixed(1)} ${cp2y.toFixed(1)}, ${p2.x.toFixed(1)} ${p2.y.toFixed(1)}`;
   }
   return d + ' Z';
+}
+
+/**
+ * Converte una lista aperta di punti in una curva Bezier cubica continua.
+ */
+export function openCatmullRomToBezier(points: Array<{ x: number; y: number }>): string {
+  const n = points.length;
+  if (n === 0) return '';
+  if (n === 1) return `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
+  if (n === 2) {
+    return `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)} L ${points[1].x.toFixed(1)} ${points[1].y.toFixed(1)}`;
+  }
+
+  let d = `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = points[Math.max(0, i - 1)];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[Math.min(n - 1, i + 2)];
+
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+
+    d += ` C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)}, ${cp2x.toFixed(1)} ${cp2y.toFixed(1)}, ${p2.x.toFixed(1)} ${p2.y.toFixed(1)}`;
+  }
+  return d;
+}
+
+export function computePointsBoundingBox(points: Array<{ x: number; y: number }>): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  if (!points.length) {
+    return { x: 540, y: 675, width: 120, height: 120 };
+  }
+  const xs = points.map((p) => p.x);
+  const ys = points.map((p) => p.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  return {
+    x: Math.round((minX + maxX) / 2),
+    y: Math.round((minY + maxY) / 2),
+    width: Math.max(40, Math.round(maxX - minX)),
+    height: Math.max(40, Math.round(maxY - minY)),
+  };
+}
+
+/**
+ * Sottocampiona una lista di punti del cursore per estrarre nodi di controllo (`controlPoints`)
+ * ben distanziati e facilmente modificabili con lo strumento Selezione Diretta (A).
+ */
+export function extractEditableControlPoints(
+  rawPoints: Array<{ x: number; y: number }>,
+  minDistance = 24,
+  maxNodes = 24
+): Array<{ x: number; y: number }> {
+  if (rawPoints.length <= 3) {
+    return rawPoints.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
+  }
+
+  const filtered: Array<{ x: number; y: number }> = [
+    { x: Math.round(rawPoints[0].x), y: Math.round(rawPoints[0].y) },
+  ];
+
+  for (let i = 1; i < rawPoints.length; i++) {
+    const prev = filtered[filtered.length - 1];
+    const curr = rawPoints[i];
+    if (Math.hypot(curr.x - prev.x, curr.y - prev.y) >= minDistance) {
+      filtered.push({ x: Math.round(curr.x), y: Math.round(curr.y) });
+    }
+  }
+
+  // Se l'ultimo punto è troppo vicino al primo (chiusura), rimuoviamolo per evitare nodi sovrapposti
+  if (
+    filtered.length > 3 &&
+    Math.hypot(
+      filtered[filtered.length - 1].x - filtered[0].x,
+      filtered[filtered.length - 1].y - filtered[0].y
+    ) < minDistance * 0.75
+  ) {
+    filtered.pop();
+  }
+
+  if (filtered.length <= maxNodes) {
+    return filtered;
+  }
+
+  const step = filtered.length / maxNodes;
+  const decimated: Array<{ x: number; y: number }> = [];
+  for (let i = 0; i < maxNodes; i++) {
+    decimated.push(filtered[Math.min(filtered.length - 1, Math.floor(i * step))]);
+  }
+  return decimated;
+}
+
+/**
+ * MACCHIA BLOB COL CURSORE (Nessun vincolo rettangolare):
+ * - Modalità 'freeform-lasso': trasforma qualsiasi traiettoria disegnata a mano libera col cursore
+ *   in una forma organica chiusa morbida (Matisse Cutout / Lazo organico) con nodi modificabili.
+ * - Modalità 'blob-brush-merge': genera una macchia pennello spessa organica (stile Illustrator Shift+B)
+ *   che segue la traiettoria del cursore e può fondersi con le macchie esistenti.
+ */
+export function generateFreeformCursorBlobPath(
+  samples: PointerSample[],
+  mode: BlobDrawMode = 'freeform-lasso',
+  brushSize = 54,
+  organicWobble = 0.12
+): {
+  pathData: string;
+  controlPoints: Array<{ x: number; y: number }>;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  if (samples.length === 0) {
+    return { pathData: '', controlPoints: [], x: 540, y: 675, width: 120, height: 120 };
+  }
+
+  // Se l'utente ha fatto un singolo clic o un micro-tratto, crea una macchia organica centrata sul cursore
+  if (samples.length < 3) {
+    const cx = samples[0].x;
+    const cy = samples[0].y;
+    const r = Math.max(36, brushSize);
+    const pts: Array<{ x: number; y: number }> = [];
+    const lobes = 8;
+    for (let i = 0; i < lobes; i++) {
+      const angle = (i / lobes) * Math.PI * 2;
+      const rad = r * (1 + Math.sin(angle * 3 + cx * 0.05) * 0.16);
+      pts.push({
+        x: Math.round(cx + Math.cos(angle) * rad),
+        y: Math.round(cy + Math.sin(angle) * rad),
+      });
+    }
+    return {
+      pathData: closedCatmullRomToBezier(pts),
+      controlPoints: pts,
+      x: Math.round(cx),
+      y: Math.round(cy),
+      width: Math.round(r * 2.2),
+      height: Math.round(r * 2.2),
+    };
+  }
+
+  if (mode === 'blob-brush-merge') {
+    const isPenInput = samples.some((s) => s.pointerType === 'pen');
+    const smoothed = chaikinSmooth(samples, 2);
+    const inputPoints = smoothed.map((pt) => [pt.x, pt.y, pt.pressure]);
+    const outlinePoints = getStroke(inputPoints, {
+      size: Math.max(24, brushSize),
+      thinning: isPenInput ? 0.35 : 0.22,
+      smoothing: 0.78,
+      streamline: 0.68,
+      simulatePressure: !isPenInput,
+      start: { taper: 0, cap: true },
+      end: { taper: 0, cap: true },
+    });
+    const contourPts = outlinePoints.map(([px, py]) => ({ x: px, y: py }));
+    const controlPoints = extractEditableControlPoints(contourPts, 28, 22);
+    const pathData =
+      controlPoints.length >= 4
+        ? closedCatmullRomToBezier(controlPoints)
+        : getSvgPathFromStroke(outlinePoints);
+    const bbox = computePointsBoundingBox(contourPts.length ? contourPts : samples);
+    return {
+      pathData,
+      controlPoints,
+      ...bbox,
+    };
+  }
+
+  // Modalità 'freeform-lasso': la traiettoria del cursore definisce direttamente il perimetro della forma libera
+  const smoothed = chaikinSmooth(samples, 1);
+  const rawControlPoints = extractEditableControlPoints(smoothed, 22, 26);
+
+  // Assicura almeno 4 punti per una curva chiusa Catmull-Rom morbida
+  let controlPoints = rawControlPoints;
+  if (controlPoints.length === 3) {
+    const mid = {
+      x: Math.round((controlPoints[0].x + controlPoints[2].x) / 2),
+      y: Math.round((controlPoints[0].y + controlPoints[2].y) / 2),
+    };
+    controlPoints = [controlPoints[0], controlPoints[1], controlPoints[2], mid];
+  } else if (controlPoints.length < 3) {
+    const c = samples[0];
+    controlPoints = [
+      { x: Math.round(c.x - 45), y: Math.round(c.y - 35) },
+      { x: Math.round(c.x + 48), y: Math.round(c.y - 30) },
+      { x: Math.round(c.x + 40), y: Math.round(c.y + 42) },
+      { x: Math.round(c.x - 42), y: Math.round(c.y + 38) },
+    ];
+  }
+
+  // Applica una lieve modulazione organica opzionale ai nodi se richiesta
+  if (organicWobble > 0) {
+    const bboxTemp = computePointsBoundingBox(controlPoints);
+    const avgRadius = Math.max(20, (bboxTemp.width + bboxTemp.height) * 0.25);
+    controlPoints = controlPoints.map((pt, idx) => {
+      const angle = Math.atan2(pt.y - bboxTemp.y, pt.x - bboxTemp.x);
+      const offset = Math.sin(idx * 2.1 + angle * 2) * avgRadius * organicWobble * 0.15;
+      return {
+        x: Math.round(pt.x + Math.cos(angle) * offset),
+        y: Math.round(pt.y + Math.sin(angle) * offset),
+      };
+    });
+  }
+
+  const pathData = closedCatmullRomToBezier(controlPoints);
+  const bbox = computePointsBoundingBox(controlPoints);
+  return {
+    pathData,
+    controlPoints,
+    ...bbox,
+  };
+}
+
+/**
+ * Ricalcola il tracciato SVG e il bounding box quando l'utente sposta i singoli nodi (`controlPoints`)
+ * con lo strumento Selezione Diretta (A) o Penna Bezier (P).
+ */
+export function rebuildPathFromControlPoints(
+  controlPoints: Array<{ x: number; y: number }>,
+  closed = true
+): {
+  pathData: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  const pathData = closed
+    ? closedCatmullRomToBezier(controlPoints)
+    : openCatmullRomToBezier(controlPoints);
+  const bbox = computePointsBoundingBox(controlPoints);
+  return {
+    pathData,
+    ...bbox,
+  };
+}
+
+/**
+ * Genera forme geometriche vettoriali (Rettangolo/Arrotondato, Ellisse, Poligono/Esagono, Stella)
+ * complete di `controlPoints` per poterle poi deformare nodo per nodo con Selezione Diretta (A).
+ */
+export function generateShapePrimitivePath(
+  kind: ShapePrimitiveKind,
+  cx: number,
+  cy: number,
+  width: number,
+  height: number,
+  cornerRadius = 0
+): {
+  pathData: string;
+  controlPoints: Array<{ x: number; y: number }>;
+} {
+  const rx = Math.max(20, width / 2);
+  const ry = Math.max(20, height / 2);
+
+  if (kind === 'ellipse') {
+    const pts: Array<{ x: number; y: number }> = [];
+    const segments = 12;
+    for (let i = 0; i < segments; i++) {
+      const a = (i / segments) * Math.PI * 2;
+      pts.push({
+        x: Math.round(cx + Math.cos(a) * rx),
+        y: Math.round(cy + Math.sin(a) * ry),
+      });
+    }
+    return {
+      pathData: closedCatmullRomToBezier(pts),
+      controlPoints: pts,
+    };
+  }
+
+  if (kind === 'polygon') {
+    const sides = 6;
+    const pts: Array<{ x: number; y: number }> = [];
+    for (let i = 0; i < sides; i++) {
+      const a = (i / sides) * Math.PI * 2 - Math.PI / 2;
+      pts.push({
+        x: Math.round(cx + Math.cos(a) * rx),
+        y: Math.round(cy + Math.sin(a) * ry),
+      });
+    }
+    const d =
+      pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ') +
+      ' Z';
+    return { pathData: d, controlPoints: pts };
+  }
+
+  if (kind === 'star') {
+    const pointsCount = 10;
+    const pts: Array<{ x: number; y: number }> = [];
+    for (let i = 0; i < pointsCount; i++) {
+      const a = (i / pointsCount) * Math.PI * 2 - Math.PI / 2;
+      const factor = i % 2 === 0 ? 1 : 0.44;
+      pts.push({
+        x: Math.round(cx + Math.cos(a) * rx * factor),
+        y: Math.round(cy + Math.sin(a) * ry * factor),
+      });
+    }
+    const d =
+      pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ') +
+      ' Z';
+    return { pathData: d, controlPoints: pts };
+  }
+
+  // Default: rect (con supporto cornerRadius)
+  const left = cx - rx;
+  const right = cx + rx;
+  const top = cy - ry;
+  const bottom = cy + ry;
+  const r = Math.min(Math.max(0, cornerRadius), rx * 0.8, ry * 0.8);
+
+  const pts: Array<{ x: number; y: number }> = [
+    { x: Math.round(left), y: Math.round(top) },
+    { x: Math.round(right), y: Math.round(top) },
+    { x: Math.round(right), y: Math.round(bottom) },
+    { x: Math.round(left), y: Math.round(bottom) },
+  ];
+
+  if (r <= 1) {
+    const d = `M ${left.toFixed(1)} ${top.toFixed(1)} L ${right.toFixed(1)} ${top.toFixed(1)} L ${right.toFixed(1)} ${bottom.toFixed(1)} L ${left.toFixed(1)} ${bottom.toFixed(1)} Z`;
+    return { pathData: d, controlPoints: pts };
+  }
+
+  const d = [
+    `M ${(left + r).toFixed(1)} ${top.toFixed(1)}`,
+    `L ${(right - r).toFixed(1)} ${top.toFixed(1)}`,
+    `Q ${right.toFixed(1)} ${top.toFixed(1)} ${right.toFixed(1)} ${(top + r).toFixed(1)}`,
+    `L ${right.toFixed(1)} ${(bottom - r).toFixed(1)}`,
+    `Q ${right.toFixed(1)} ${bottom.toFixed(1)} ${(right - r).toFixed(1)} ${bottom.toFixed(1)}`,
+    `L ${(left + r).toFixed(1)} ${bottom.toFixed(1)}`,
+    `Q ${left.toFixed(1)} ${bottom.toFixed(1)} ${left.toFixed(1)} ${(bottom - r).toFixed(1)}`,
+    `L ${left.toFixed(1)} ${(top + r).toFixed(1)}`,
+    `Q ${left.toFixed(1)} ${top.toFixed(1)} ${(left + r).toFixed(1)} ${top.toFixed(1)}`,
+    'Z',
+  ].join(' ');
+  return { pathData: d, controlPoints: pts };
 }
 
 /**

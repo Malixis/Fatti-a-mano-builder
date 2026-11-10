@@ -554,11 +554,22 @@ function parseVectorElementFromCloud(raw: Record<string, unknown>): VectorElemen
     scale: Number(raw.scale) || 1,
     color: String(raw.color || '#1A2B4C'),
     secondaryColor: String(raw.secondaryColor || '#B85B43'),
+    strokeColor: typeof raw.strokeColor === 'string' ? raw.strokeColor : undefined,
+    strokeWidth: typeof raw.strokeWidth === 'number' ? raw.strokeWidth : undefined,
+    strokeDasharray: typeof raw.strokeDasharray === 'string' ? raw.strokeDasharray : undefined,
+    flipX: Boolean(raw.flipX ?? false),
+    flipY: Boolean(raw.flipY ?? false),
     opacity: Number(raw.opacity ?? 1),
     zIndex: Number(raw.zIndex || 1),
     visible: Boolean(raw.visible ?? true),
     locked: Boolean(raw.locked ?? false),
     pathData: String(raw.pathData || ''),
+    controlPoints: Array.isArray(raw.controlPoints)
+      ? raw.controlPoints.map((pt: Record<string, unknown>) => ({
+          x: Number(pt.x) || 0,
+          y: Number(pt.y) || 0,
+        }))
+      : undefined,
     subPaths: Array.isArray(raw.subPaths)
       ? raw.subPaths.map((sp: Record<string, unknown>) => ({
           d: String(sp.d || ''),
@@ -570,8 +581,24 @@ function parseVectorElementFromCloud(raw: Record<string, unknown>): VectorElemen
     textureType: (raw.textureType as VectorElement['textureType']) || 'none',
     textContent: String(raw.textContent || ''),
     fontStyle: (raw.fontStyle as VectorElement['fontStyle']) || 'editorial-serif',
+    fontFamily:
+      raw.fontFamily === 'Montserrat' || raw.fontFamily === 'Akena Otos'
+        ? raw.fontFamily
+        : undefined,
+    fontWeight:
+      typeof raw.fontWeight === 'number'
+        ? (raw.fontWeight as VectorElement['fontWeight'])
+        : undefined,
+    fontItalic: typeof raw.fontItalic === 'boolean' ? raw.fontItalic : undefined,
+    letterSpacing: typeof raw.letterSpacing === 'number' ? raw.letterSpacing : undefined,
+    lineHeight: typeof raw.lineHeight === 'number' ? raw.lineHeight : undefined,
+    textAlign: (raw.textAlign as VectorElement['textAlign']) || undefined,
+    textTransform: (raw.textTransform as VectorElement['textTransform']) || undefined,
+    textBoxWidth: typeof raw.textBoxWidth === 'number' ? raw.textBoxWidth : undefined,
     fontSize: Number(raw.fontSize || 42),
     stampKind: (raw.stampKind as VectorElement['stampKind']) || 'seal-fatti-a-mano',
+    shapeKind: (raw.shapeKind as VectorElement['shapeKind']) || undefined,
+    cornerRadius: typeof raw.cornerRadius === 'number' ? raw.cornerRadius : undefined,
     isHandDrawnText: Boolean(raw.isHandDrawnText ?? false),
     partnerId: String(raw.partnerId || ''),
   };

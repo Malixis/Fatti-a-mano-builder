@@ -13,12 +13,22 @@ import {
   chaikinSmooth,
   computeSamplePressure,
   createDefaultWorkshopDesign,
+  generateFreeformCursorBlobPath,
   generateOrganicBlobPath,
+  generateShapePrimitivePath,
   generateSmoothedBrushPath,
   generateWavyCheckerboardPath,
+  rebuildPathFromControlPoints,
   syncPosterElementsWithWorkshop,
 } from './vectorMath';
-import { InventoryItem, MaterialItem, PartnerProfile, WorkshopCard } from '../types/erp';
+import {
+  FONT_DECLINATIONS,
+  InventoryItem,
+  MaterialItem,
+  PartnerProfile,
+  PointerSample,
+  WorkshopCard,
+} from '../types/erp';
 
 test('calculateWorkshopRoi computes Event 1 vs Subsequent Events margins accurately for 20 pax', () => {
   const materials: MaterialItem[] = [
@@ -227,4 +237,39 @@ test('buildPosterFromWorkshop binds Workshop data into 1080x1350 poster layers a
   assert.equal(sanitizedTemplate.ownerId, 'user_123');
   assert.ok(sanitizedTemplate.clientUpdatedAt > 0);
 });
+
+test('generateFreeformCursorBlobPath, rebuildPathFromControlPoints, and Montserrat/Akena Otos declinations work as expected', () => {
+  assert.equal(FONT_DECLINATIONS.length, 18, 'Must support all 18 declinations (100-900 normal + italic)');
+
+  const cursorSamples: PointerSample[] = [
+    { x: 200, y: 200, pressure: 0.6, timestamp: 0, pointerType: 'mouse' },
+    { x: 340, y: 180, pressure: 0.7, timestamp: 16, pointerType: 'mouse' },
+    { x: 420, y: 290, pressure: 0.8, timestamp: 32, pointerType: 'mouse' },
+    { x: 310, y: 410, pressure: 0.7, timestamp: 48, pointerType: 'mouse' },
+    { x: 180, y: 350, pressure: 0.6, timestamp: 64, pointerType: 'mouse' },
+  ];
+
+  const lassoBlob = generateFreeformCursorBlobPath(cursorSamples, 'freeform-lasso', 48, 0.12);
+  assert.ok(lassoBlob.pathData.startsWith('M'), 'Freeform lasso blob must produce an SVG path');
+  assert.ok(lassoBlob.pathData.endsWith('Z'), 'Freeform lasso blob must be a closed contour');
+  assert.ok(lassoBlob.controlPoints.length >= 4, 'Must extract editable Bezier control points');
+
+  const brushBlob = generateFreeformCursorBlobPath(cursorSamples, 'blob-brush-merge', 54, 0.1);
+  assert.ok(brushBlob.pathData.startsWith('M'), 'Blob brush merge must produce an SVG path');
+  assert.ok(brushBlob.width >= 40 && brushBlob.height >= 40);
+
+  // Node editing via Direct Selection (A)
+  const modifiedNodes = lassoBlob.controlPoints.map((pt, i) =>
+    i === 0 ? { x: pt.x + 50, y: pt.y - 30 } : pt
+  );
+  const rebuilt = rebuildPathFromControlPoints(modifiedNodes, true);
+  assert.ok(rebuilt.pathData.includes('C'), 'Rebuilt path must use cubic Bezier curves');
+  assert.notEqual(rebuilt.pathData, lassoBlob.pathData);
+
+  // Geometric shape primitive with control points
+  const starShape = generateShapePrimitivePath('star', 540, 675, 240, 240);
+  assert.equal(starShape.controlPoints.length, 10);
+  assert.ok(starShape.pathData.endsWith('Z'));
+});
+
 

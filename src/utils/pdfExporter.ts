@@ -175,6 +175,7 @@ export function exportSvgCanvas(
 
   const serializer = new XMLSerializer();
   const clone = svgElement.cloneNode(true) as SVGSVGElement;
+  clone.querySelectorAll('[data-ui-overlay="true"]').forEach((node) => node.remove());
   clone.setAttribute('width', String(width));
   clone.setAttribute('height', String(height));
   clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
