@@ -5,10 +5,17 @@ import {
   Code2,
   Copy,
   Cpu,
+  ExternalLink,
   GitBranch,
   Layers,
+  ShieldAlert,
   Terminal,
 } from 'lucide-react';
+import { FIREBASE_AUTH_SETTINGS_URL } from '../firebase';
+
+interface SetupArchitectureViewProps {
+  onOpenDomainHelper?: () => void;
+}
 
 const GITHUB_WORKFLOW_SNIPPET = `name: Deploy Fatti a mano ERP to GitHub Pages
 
@@ -60,7 +67,9 @@ jobs:
       - id: deployment
         uses: actions/deploy-pages@v4`;
 
-export const SetupArchitectureView: React.FC = () => {
+export const SetupArchitectureView: React.FC<SetupArchitectureViewProps> = ({
+  onOpenDomainHelper,
+}) => {
   const [copiedWorkflow, setCopiedWorkflow] = useState(false);
 
   const handleCopyWorkflow = () => {
@@ -128,17 +137,40 @@ export const SetupArchitectureView: React.FC = () => {
                 </p>
               </div>
 
-              <div className="p-3 bg-[#F4ECE1] rounded-lg border border-[#1A2B4C]/15 space-y-1.5">
-                <div className="font-bold text-[#1A2B4C]">
-                  Passaggio B — Autorizza il dominio GitHub su Firebase Auth
+              <div className="p-3 bg-[#F4ECE1] rounded-lg border border-[#B85B43]/40 space-y-2">
+                <div className="font-bold text-[#B85B43] flex items-center gap-1.5">
+                  <ShieldAlert className="w-3.5 h-3.5" />
+                  <span>Passaggio B — Risolvi auth/unauthorized-domain su GitHub Pages</span>
                 </div>
-                <p className="text-[#1A2B4C]/80 leading-relaxed">
-                  Per far funzionare <strong>Accedi con Google</strong> e <strong>Google Calendar</strong> sul sito pubblicato, apri la{' '}
-                  <strong>Firebase Console &rarr; Authentication &rarr; Settings &rarr; Authorized domains</strong> e aggiungi il tuo dominio{' '}
+                <p className="text-[#1A2B4C]/85 leading-relaxed">
+                  Per sbloccare <strong>Accedi con Google</strong> e <strong>Google Calendar</strong> sul sito GitHub Pages, aggiungi il tuo dominio{' '}
                   <code className="font-mono bg-[#EADDCD] px-1 py-0.5 rounded">
                     tuo-username.github.io
-                  </code>.
+                  </code>{' '}
+                  in <strong>Firebase Console &rarr; Authentication &rarr; Settings &rarr; Authorized domains</strong>.
                 </p>
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  {onOpenDomainHelper && (
+                    <button
+                      type="button"
+                      data-testid="open-domain-helper-btn"
+                      onClick={onOpenDomainHelper}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 bg-[#B85B43] text-[#F4ECE1] rounded-lg text-[11px] font-bold hover:bg-[#B85B43]/90 transition-colors"
+                    >
+                      <ShieldAlert className="w-3.5 h-3.5" />
+                      <span>Apri Assistente Dominio Autorizzato</span>
+                    </button>
+                  )}
+                  <a
+                    href={FIREBASE_AUTH_SETTINGS_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1 px-2.5 py-1.5 bg-[#1A2B4C] text-[#EADDCD] rounded-lg text-[11px] font-semibold hover:bg-[#1A2B4C]/90 transition-colors"
+                  >
+                    <span>Apri Firebase Console</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
               </div>
 
               <div className="p-3 bg-[#F4ECE1] rounded-lg border border-[#1A2B4C]/15 space-y-1.5">

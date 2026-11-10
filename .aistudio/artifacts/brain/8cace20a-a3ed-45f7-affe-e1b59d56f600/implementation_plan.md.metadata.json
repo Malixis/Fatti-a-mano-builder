@@ -1,6 +1,6 @@
 {
-  "summary":  "Piano di implementazione per l'evoluzione di Fatti a mano — Lab & Design ERP: Modulo Gestione Partner con Brand Kit e menu a tendina nel Builder Grafico, sincronizzazione eventi su Google Calendar, persistenza automatica multi-dispositivo su account Google Firebase, Protocollo Operativo dinamico con assistenza IA Gemini per singola fase, e Calcolatore Economico con modalità Collegata/Scollegata, calcolo Confezioni x Pezzi e Inventario Totale del format.",
-  "updatedAt":  "2026-11-09T21:51:08.119467792Z",
+  "summary":  "Guida passo-passo e piano di aggiornamento per risolvere l'errore Firebase (auth/unauthorized-domain) su GitHub Pages autorizzando il dominio github.io nella Firebase Console e aggiungendo nell'app un assistente automatico con link diretto al progetto Firebase.",
+  "updatedAt":  "2026-11-10T08:27:13.545887048Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

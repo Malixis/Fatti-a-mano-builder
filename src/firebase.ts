@@ -3,8 +3,10 @@ import {
   GoogleAuthProvider,
   User,
   getAuth,
+  getRedirectResult,
   onAuthStateChanged,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
 } from 'firebase/auth';
 import {
@@ -36,9 +38,26 @@ const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 
+export const FIREBASE_PROJECT_ID = firebaseConfig.projectId;
+export const FIREBASE_AUTH_SETTINGS_URL = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/settings`;
+
 // Scope per Google Calendar (Workspace Integration)
 const SCOPES = ['https://www.googleapis.com/auth/calendar.events'];
 let cachedAccessToken: string | null = null;
+
+// Recupera eventuale token OAuth se il login è avvenuto tramite signInWithRedirect (es. Safari iPad)
+getRedirectResult(auth)
+  .then((result) => {
+    if (result) {
+      const credential = GoogleAuthProvider.credentialFromResult(result);
+      if (credential?.accessToken) {
+        cachedAccessToken = credential.accessToken;
+      }
+    }
+  })
+  .catch((err) => {
+    console.warn('Redirect auth check:', err);
+  });
 
 // Validate connection to Firestore on boot as required by firebase-integration-rpc
 async function testConnection() {
@@ -104,6 +123,16 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
+export function isUnauthorizedDomainError(error: unknown): boolean {
+  if (!error) return false;
+  const code = (error as { code?: string })?.code || '';
+  const msg = error instanceof Error ? error.message : String(error);
+  return (
+    code === 'auth/unauthorized-domain' ||
+    msg.includes('auth/unauthorized-domain')
+  );
+}
+
 function createGoogleProvider() {
   const provider = new GoogleAuthProvider();
   SCOPES.forEach((scope) => provider.addScope(scope));
@@ -112,10 +141,19 @@ function createGoogleProvider() {
 
 export async function loginWithGoogle(): Promise<User> {
   const provider = createGoogleProvider();
-  const result = await signInWithPopup(auth, provider);
-  const credential = GoogleAuthProvider.credentialFromResult(result);
-  cachedAccessToken = credential?.accessToken ?? null;
-  return result.user;
+  try {
+    const result = await signInWithPopup(auth, provider);
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    cachedAccessToken = credential?.accessToken ?? null;
+    return result.user;
+  } catch (error) {
+    const code = (error as { code?: string })?.code || '';
+    if (code === 'auth/popup-blocked') {
+      await signInWithRedirect(auth, provider);
+      throw new Error('Reindirizzamento al login Google in corso...');
+    }
+    throw error;
+  }
 }
 
 export async function getAccessToken(): Promise<string> {
@@ -195,7 +233,6 @@ export async function syncWorkshopToGoogleCalendar(
       },
       body: JSON.stringify(eventPayload),
     });
-    // Se l'evento non esiste più sul calendario, creiamone uno nuovo
     if (response.status === 404) {
       response = await fetch(baseUrl, {
         method: 'POST',

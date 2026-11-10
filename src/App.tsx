@@ -20,9 +20,12 @@ import { FontTextureEngine } from './components/FontTextureEngine';
 import { LabManager } from './components/LabManager';
 import { SetupArchitectureView } from './components/SetupArchitectureView';
 import {
+  FIREBASE_AUTH_SETTINGS_URL,
+  FIREBASE_PROJECT_ID,
   deleteInventoryItemFromCloud,
   deletePartnerFromCloud,
   deleteWorkshopFromCloud,
+  isUnauthorizedDomainError,
   loginWithGoogle,
   logoutFirebase,
   saveInventoryItemToCloud,
@@ -35,6 +38,7 @@ import {
   subscribeUserWorkshops,
   syncWorkshopToGoogleCalendar,
 } from './firebase';
+import { Check, Copy, ExternalLink, ShieldAlert, X } from 'lucide-react';
 
 type ActiveModuleTab = 'lab-manager' | 'graphic-builder' | 'font-engine' | 'setup-docs';
 
@@ -94,6 +98,21 @@ export default function App() {
   const [isSavingCloud, setIsSavingCloud] = useState<boolean>(false);
   const [bridgeBanner, setBridgeBanner] = useState<string | null>(null);
 
+  // Stato Modale Guidato per Errore Firebase auth/unauthorized-domain (es. su GitHub Pages)
+  const [showDomainModal, setShowDomainModal] = useState<boolean>(false);
+  const [copiedDomain, setCopiedDomain] = useState<boolean>(false);
+
+  const currentHostname =
+    typeof window !== 'undefined' && window.location.hostname
+      ? window.location.hostname
+      : 'tuo-username.github.io';
+
+  const handleCopyHostname = () => {
+    navigator.clipboard?.writeText(currentHostname).catch(() => {});
+    setCopiedDomain(true);
+    setTimeout(() => setCopiedDomain(false), 2200);
+  };
+
   // Salvataggio automatico su localStorage per persistenza immediata
   useEffect(() => {
     try {
@@ -123,6 +142,9 @@ export default function App() {
   useEffect(() => {
     const unsubAuth = subscribeToAuth((currentUser) => {
       setUser(currentUser);
+      if (currentUser) {
+        setShowDomainModal(false);
+      }
     });
     return () => unsubAuth();
   }, []);
@@ -332,12 +354,22 @@ export default function App() {
     workshop: WorkshopCard,
     partner?: PartnerProfile
   ) => {
-    const res = await syncWorkshopToGoogleCalendar(workshop, partner);
-    setBridgeBanner(
-      `Evento "${workshop.title}" sincronizzato su Google Calendar per il ${workshop.eventDate} alle ${workshop.eventStartTime}!`
-    );
-    setTimeout(() => setBridgeBanner(null), 4500);
-    return res;
+    try {
+      const res = await syncWorkshopToGoogleCalendar(workshop, partner);
+      setBridgeBanner(
+        `Evento "${workshop.title}" sincronizzato su Google Calendar per il ${workshop.eventDate} alle ${workshop.eventStartTime}!`
+      );
+      setTimeout(() => setBridgeBanner(null), 4500);
+      return res;
+    } catch (error) {
+      if (isUnauthorizedDomainError(error)) {
+        setShowDomainModal(true);
+        throw new Error(
+          `Il dominio "${currentHostname}" deve essere aggiunto tra i Domini Autorizzati nella Firebase Console.`
+        );
+      }
+      throw error;
+    }
   };
 
   // Modulo 3: Il Ponte Data-Binding ("Genera Locandina")
@@ -392,6 +424,10 @@ export default function App() {
         const loggedUser = await loginWithGoogle();
         await syncAllForUser(loggedUser);
       } catch (e) {
+        if (isUnauthorizedDomainError(e)) {
+          setShowDomainModal(true);
+          return;
+        }
         console.error(e);
       }
       return;
@@ -432,6 +468,10 @@ export default function App() {
         const logged = await loginWithGoogle();
         await runSave(logged);
       } catch (e) {
+        if (isUnauthorizedDomainError(e)) {
+          setShowDomainModal(true);
+          return;
+        }
         console.error(e);
       }
     } else {
@@ -445,12 +485,15 @@ export default function App() {
     } else {
       try {
         const logged = await loginWithGoogle();
-        // Al login, sincronizza subito lo stato corrente sull'account
         await handleSaveWorkshopCloud(
           workshops.find((w) => w.id === activeWorkshopId) || workshops[0]
         );
         setUser(logged);
       } catch (e) {
+        if (isUnauthorizedDomainError(e)) {
+          setShowDomainModal(true);
+          return;
+        }
         console.error(e);
       }
     }
@@ -528,7 +571,7 @@ export default function App() {
         </nav>
 
         {/* Zona 3: 1 Primary Action (Google Account Sync + Calendar OAuth) */}
-        <div className="flex items-center shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
           {user ? (
             <button
               type="button"
@@ -654,15 +697,135 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'setup-docs' && <SetupArchitectureView />}
+        {activeTab === 'setup-docs' && (
+          <SetupArchitectureView
+            onOpenDomainHelper={() => setShowDomainModal(true)}
+          />
+        )}
       </main>
+
+      {/* Modale Assistente Automatico per Autorizzare il Dominio GitHub su Firebase (auth/unauthorized-domain) */}
+      {showDomainModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="firebase-domain-modal-title"
+          className="fixed inset-0 z-50 bg-[#1A2B4C]/65 flex items-center justify-center p-4"
+        >
+          <div className="bg-[#F4ECE1] border border-[#1A2B4C]/25 rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-xl">
+            <div className="flex items-center justify-between border-b border-[#1A2B4C]/10 pb-3">
+              <div className="flex items-center gap-2">
+                <ShieldAlert className="w-5 h-5 text-[#B85B43]" />
+                <h3
+                  id="firebase-domain-modal-title"
+                  className="text-base font-bold text-[#1A2B4C]"
+                  style={{ fontFamily: '"Fraunces", serif' }}
+                >
+                  Autorizza il Dominio GitHub su Firebase Auth
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowDomainModal(false)}
+                className="p-1 text-[#1A2B4C]/60 hover:text-[#1A2B4C]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-[#1A2B4C]/85 leading-relaxed">
+              Per consentire l&apos;accesso col tuo account Google da <strong>GitHub Pages</strong> (errore{' '}
+              <code className="font-mono bg-[#EADDCD] px-1 py-0.5 rounded text-[#B85B43]">
+                auth/unauthorized-domain
+              </code>
+              ), devi aggiungere una sola volta il tuo dominio tra i <strong>Domini Autorizzati</strong> del progetto Firebase{' '}
+              <code className="font-mono font-bold">{FIREBASE_PROJECT_ID}</code>:
+            </p>
+
+            {/* Step 1: Copia il dominio corrente */}
+            <div className="p-3.5 bg-[#EADDCD] rounded-xl border border-[#1A2B4C]/15 space-y-2">
+              <div className="text-xs font-bold text-[#1A2B4C]">
+                1. Copia il dominio da autorizzare (senza https:// né percorsi):
+              </div>
+              <div className="flex items-center justify-between gap-2 bg-[#F4ECE1] px-3 py-2 rounded-lg border border-[#1A2B4C]/20">
+                <code className="text-xs font-mono font-bold text-[#1A2B4C] select-all">
+                  {currentHostname}
+                </code>
+                <button
+                  type="button"
+                  data-testid="copy-detected-domain-btn"
+                  onClick={handleCopyHostname}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-[#1A2B4C] text-[#EADDCD] rounded text-[11px] font-semibold hover:bg-[#1A2B4C]/90"
+                >
+                  {copiedDomain ? (
+                    <>
+                      <Check className="w-3 h-3 text-[#D4A373]" />
+                      <span>Copiato</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3 h-3" />
+                      <span>Copia Dominio</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Step 2: Apri la console Firebase */}
+            <div className="p-3.5 bg-[#EADDCD] rounded-xl border border-[#1A2B4C]/15 space-y-2">
+              <div className="text-xs font-bold text-[#1A2B4C]">
+                2. Incolla il dominio in Firebase Console &rarr; Authorized domains:
+              </div>
+              <p className="text-[11px] text-[#1A2B4C]/80 leading-relaxed">
+                Clicca sul pulsante qui sotto, scorri fino a <strong>Domini autorizzati (Authorized domains)</strong>, premi <strong>Aggiungi dominio (Add domain)</strong> e incolla{' '}
+                <code className="font-mono font-bold">{currentHostname}</code>.
+              </p>
+              <a
+                href={FIREBASE_AUTH_SETTINGS_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#B85B43] text-[#EADDCD] rounded-lg text-xs font-semibold hover:bg-[#a04c36] transition-colors"
+              >
+                <span>Apri Firebase Console (Domini Autorizzati)</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowDomainModal(false)}
+                className="px-3.5 py-2 rounded-lg text-xs font-semibold text-[#1A2B4C] bg-[#EADDCD] hover:bg-[#1A2B4C]/10"
+              >
+                Chiudi
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowDomainModal(false);
+                  handleAuthAction();
+                }}
+                className="px-4 py-2 rounded-lg text-xs font-semibold bg-[#1A2B4C] text-[#EADDCD] hover:bg-[#1A2B4C]/90"
+              >
+                Riprova Accesso con Google
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Footer sobrio e funzionale */}
       <footer className="border-t border-[#1A2B4C]/10 px-6 py-4 text-xs text-[#1A2B4C]/70 flex flex-wrap items-center justify-between gap-4">
         <span>Fatti a mano — Lab &amp; Design ERP · Edutainment &amp; Craft Format</span>
-        <span>
-          Account Sync Cross-Device · Google Calendar · iPad Pro Apple Pencil &amp; Trackpad
-        </span>
+        <button
+          type="button"
+          data-testid="open-domain-helper-footer-btn"
+          onClick={() => setShowDomainModal(true)}
+          className="underline hover:text-[#1A2B4C] font-medium"
+        >
+          Configura Dominio Autorizzato Firebase / GitHub Pages
+        </button>
       </footer>
     </div>
   );
