@@ -1,0 +1,413 @@
+{
+  "entities": {
+    "Workshop": {
+      "title": "Workshop",
+      "description": "Scheda gestionale ERP di un laboratorio creativo con partner associato, calendario Google, fasi dinamiche e distinta materiali.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Titolo del laboratorio creativo",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "subtitle": {
+          "type": "string",
+          "description": "Sottotitolo o payoff dell'evento",
+          "minLength": 0,
+          "maxLength": 200
+        },
+        "location": {
+          "type": "string",
+          "description": "Locale ospitante o indirizzo del laboratorio",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "partnerId": {
+          "type": "string",
+          "description": "ID del Partner associato alla scheda laboratorio",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "dateLabel": {
+          "type": "string",
+          "description": "Data e orario formattati",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "eventDate": {
+          "type": "string",
+          "description": "Data ISO YYYY-MM-DD per sincronizzazione Google Calendar",
+          "minLength": 0,
+          "maxLength": 20
+        },
+        "eventStartTime": {
+          "type": "string",
+          "description": "Orario inizio HH:MM per sincronizzazione Google Calendar",
+          "minLength": 0,
+          "maxLength": 12
+        },
+        "eventDurationMinutes": {
+          "type": "number",
+          "description": "Durata evento in minuti"
+        },
+        "calendarEventId": {
+          "type": "string",
+          "description": "ID evento Google Calendar sincronizzato",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "category": {
+          "type": "string",
+          "description": "Categoria creativa",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "ticketPrice": {
+          "type": "number",
+          "description": "Prezzo biglietto singolo partecipante in Euro"
+        },
+        "venueFeePerPax": {
+          "type": "number",
+          "description": "Quota locale food & beverage per partecipante in Euro"
+        },
+        "targetPax": {
+          "type": "number",
+          "description": "Numero target di partecipanti"
+        },
+        "calculatorLinked": {
+          "type": "boolean",
+          "description": "Se true i valori della tabella materiali sono collegati tra loro; se false sono scollegati"
+        },
+        "phases": {
+          "type": "array",
+          "description": "Lista dinamica (max 30) di fasi operative numerate e titolate dall'utente"
+        },
+        "phase1Setup": {
+          "type": "string",
+          "description": "Sommario Fase 1 per retrocompatibilità",
+          "minLength": 0,
+          "maxLength": 3000
+        },
+        "phase2Execution": {
+          "type": "string",
+          "description": "Sommario Fase 2 per retrocompatibilità",
+          "minLength": 0,
+          "maxLength": 3000
+        },
+        "phase3Closing": {
+          "type": "string",
+          "description": "Sommario Fase 3 per retrocompatibilità",
+          "minLength": 0,
+          "maxLength": 3000
+        },
+        "materials": {
+          "type": "array",
+          "description": "Lista limitata (max 50) di materiali con confezioni ordinate e pezzi per confezione"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID Firebase dell'utente proprietario",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp di creazione server"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp di ultimo aggiornamento server"
+        }
+      },
+      "required": [
+        "title",
+        "subtitle",
+        "location",
+        "partnerId",
+        "dateLabel",
+        "eventDate",
+        "eventStartTime",
+        "eventDurationMinutes",
+        "calendarEventId",
+        "category",
+        "ticketPrice",
+        "venueFeePerPax",
+        "targetPax",
+        "calculatorLinked",
+        "phases",
+        "phase1Setup",
+        "phase2Execution",
+        "phase3Closing",
+        "materials",
+        "ownerId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Partner": {
+      "title": "Partner",
+      "description": "Profilo Partner / Locale con Brand Kit (logo, font, palette colori), chi sono e accordo commerciale.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Nome del Partner o Locale ospitante",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "whoTheyAre": {
+          "type": "string",
+          "description": "Descrizione di chi sono e cosa fanno",
+          "minLength": 0,
+          "maxLength": 1000
+        },
+        "address": {
+          "type": "string",
+          "description": "Indirizzo e città del partner",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "commercialDealType": {
+          "type": "string",
+          "description": "Tipologia di accordo commerciale stipulato",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "commercialDealNotes": {
+          "type": "string",
+          "description": "Condizioni dettagliate del rapporto commerciale",
+          "minLength": 0,
+          "maxLength": 1000
+        },
+        "defaultVenueFee": {
+          "type": "number",
+          "description": "Quota F&B o fee concordata per partecipante in Euro"
+        },
+        "logoText": {
+          "type": "string",
+          "description": "Monogramma o testo del logo partner",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "logoShape": {
+          "type": "string",
+          "description": "Forma grafica del badge/logo vettoriale",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "fontStyle": {
+          "type": "string",
+          "description": "Font tipografico del partner",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "palette": {
+          "type": "array",
+          "description": "Palette colori esadecimali del partner (max 6)"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID Firebase dell'utente proprietario",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp di creazione server"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp di ultimo aggiornamento server"
+        }
+      },
+      "required": [
+        "name",
+        "whoTheyAre",
+        "address",
+        "commercialDealType",
+        "commercialDealNotes",
+        "defaultVenueFee",
+        "logoText",
+        "logoShape",
+        "fontStyle",
+        "palette",
+        "ownerId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "InventoryItem": {
+      "title": "InventoryItem",
+      "description": "Elemento dell'Inventario Totale del format aggiornato in base ai laboratori svolti.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Nome del materiale o attrezzatura in magazzino",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "costType": {
+          "type": "string",
+          "description": "Fisso (attrezzatura) o Variabile (consumo)",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "packsOrderedTotal": {
+          "type": "number",
+          "description": "Totale confezioni ordinate storicamente"
+        },
+        "piecesPerPack": {
+          "type": "number",
+          "description": "Pezzi contenuti in ogni confezione"
+        },
+        "totalPiecesAvailable": {
+          "type": "number",
+          "description": "Quantità di pezzi attualmente disponibili nell'inventario del format"
+        },
+        "totalPiecesUsed": {
+          "type": "number",
+          "description": "Quantità di pezzi consumati nei laboratori confermati"
+        },
+        "unitCostPerPack": {
+          "type": "number",
+          "description": "Costo per confezione in Euro"
+        },
+        "lastWorkshopTitle": {
+          "type": "string",
+          "description": "Ultimo laboratorio che ha movimentato la scorta",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID Firebase dell'utente proprietario",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp di creazione server"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp di ultimo aggiornamento server"
+        }
+      },
+      "required": [
+        "name",
+        "costType",
+        "packsOrderedTotal",
+        "piecesPerPack",
+        "totalPiecesAvailable",
+        "totalPiecesUsed",
+        "unitCostPerPack",
+        "lastWorkshopTitle",
+        "ownerId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "DesignTemplate": {
+      "title": "DesignTemplate",
+      "description": "Progetto vettoriale salvato dal Builder Grafico con livelli e tracciati texturizzati.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Nome del template o locandina",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "presetName": {
+          "type": "string",
+          "description": "Nome formato",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "width": {
+          "type": "number",
+          "description": "Larghezza canvas in pixel"
+        },
+        "height": {
+          "type": "number",
+          "description": "Altezza canvas in pixel"
+        },
+        "backgroundColor": {
+          "type": "string",
+          "description": "Colore esadecimale sfondo",
+          "minLength": 4,
+          "maxLength": 16
+        },
+        "elements": {
+          "type": "array",
+          "description": "Lista limitata (max 80) di elementi vettoriali sul canvas"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID Firebase dell'utente proprietario",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp di creazione server"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp di ultimo aggiornamento server"
+        }
+      },
+      "required": [
+        "title",
+        "presetName",
+        "width",
+        "height",
+        "backgroundColor",
+        "elements",
+        "ownerId",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/workshops/{workshopId}": {
+      "schema": {
+        "$ref": "#/entities/Workshop"
+      },
+      "description": "Collezione delle schede laboratorio ERP sincronizzate sull'account utente."
+    },
+    "/partners/{partnerId}": {
+      "schema": {
+        "$ref": "#/entities/Partner"
+      },
+      "description": "Collezione dei Partner commerciali con Brand Kit (logo, font, palette) e accordi."
+    },
+    "/inventory/{itemId}": {
+      "schema": {
+        "$ref": "#/entities/InventoryItem"
+      },
+      "description": "Inventario totale dei materiali del format aggiornato dai laboratori svolti."
+    },
+    "/templates/{templateId}": {
+      "schema": {
+        "$ref": "#/entities/DesignTemplate"
+      },
+      "description": "Collezione dei progetti grafici e locandine vettoriali salvati dall'utente."
+    }
+  }
+}

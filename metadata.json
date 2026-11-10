@@ -1,0 +1,8 @@
+{
+  "name": "Fatti a mano - Lab & Design ERP",
+  "description": "Piattaforma gestionale ERP e software di progettazione vettoriale e tipografica per laboratori creativi ed edutainment, ottimizzata per iPad Pro e Apple Pencil.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,220 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reusable Hardened Helpers
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidWorkshop(data) {
+      return data.keys().hasAll([
+        'title', 'subtitle', 'location', 'partnerId', 'dateLabel',
+        'eventDate', 'eventStartTime', 'eventDurationMinutes', 'calendarEventId',
+        'category', 'ticketPrice', 'venueFeePerPax', 'targetPax', 'calculatorLinked',
+        'phases', 'phase1Setup', 'phase2Execution', 'phase3Closing',
+        'materials', 'ownerId', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'title', 'subtitle', 'location', 'partnerId', 'dateLabel',
+        'eventDate', 'eventStartTime', 'eventDurationMinutes', 'calendarEventId',
+        'category', 'ticketPrice', 'venueFeePerPax', 'targetPax', 'calculatorLinked',
+        'phases', 'phase1Setup', 'phase2Execution', 'phase3Closing',
+        'materials', 'ownerId', 'createdAt', 'updatedAt'
+      ]) &&
+      data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+      data.subtitle is string && data.subtitle.size() <= 200 &&
+      data.location is string && data.location.size() >= 1 && data.location.size() <= 160 &&
+      data.partnerId is string && data.partnerId.size() <= 128 &&
+      data.dateLabel is string && data.dateLabel.size() >= 1 && data.dateLabel.size() <= 80 &&
+      data.eventDate is string && data.eventDate.size() <= 20 &&
+      data.eventStartTime is string && data.eventStartTime.size() <= 12 &&
+      data.eventDurationMinutes is number && data.eventDurationMinutes >= 15 && data.eventDurationMinutes <= 1440 &&
+      data.calendarEventId is string && data.calendarEventId.size() <= 128 &&
+      data.category is string && data.category.size() >= 1 && data.category.size() <= 60 &&
+      data.ticketPrice is number && data.ticketPrice >= 0 && data.ticketPrice <= 10000 &&
+      data.venueFeePerPax is number && data.venueFeePerPax >= 0 && data.venueFeePerPax <= 10000 &&
+      data.targetPax is number && data.targetPax >= 1 && data.targetPax <= 1000 &&
+      data.calculatorLinked is bool &&
+      data.phases is list && data.phases.size() <= 30 &&
+      (data.phases.size() == 0 || data.phases[0] is map) &&
+      data.phase1Setup is string && data.phase1Setup.size() <= 3000 &&
+      data.phase2Execution is string && data.phase2Execution.size() <= 3000 &&
+      data.phase3Closing is string && data.phase3Closing.size() <= 3000 &&
+      data.materials is list && data.materials.size() <= 50 &&
+      (data.materials.size() == 0 || data.materials[0] is map) &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
+      data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidPartner(data) {
+      return data.keys().hasAll([
+        'name', 'whoTheyAre', 'address', 'commercialDealType',
+        'commercialDealNotes', 'defaultVenueFee', 'logoText',
+        'logoShape', 'fontStyle', 'palette', 'ownerId', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'name', 'whoTheyAre', 'address', 'commercialDealType',
+        'commercialDealNotes', 'defaultVenueFee', 'logoText',
+        'logoShape', 'fontStyle', 'palette', 'ownerId', 'createdAt', 'updatedAt'
+      ]) &&
+      data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+      data.whoTheyAre is string && data.whoTheyAre.size() <= 1000 &&
+      data.address is string && data.address.size() >= 1 && data.address.size() <= 160 &&
+      data.commercialDealType is string && data.commercialDealType.size() >= 1 && data.commercialDealType.size() <= 80 &&
+      data.commercialDealNotes is string && data.commercialDealNotes.size() <= 1000 &&
+      data.defaultVenueFee is number && data.defaultVenueFee >= 0 && data.defaultVenueFee <= 10000 &&
+      data.logoText is string && data.logoText.size() >= 1 && data.logoText.size() <= 40 &&
+      data.logoShape is string && data.logoShape.size() >= 1 && data.logoShape.size() <= 40 &&
+      data.fontStyle is string && data.fontStyle.size() >= 1 && data.fontStyle.size() <= 40 &&
+      data.palette is list && data.palette.size() >= 1 && data.palette.size() <= 6 &&
+      data.palette[0] is string && data.palette[0].size() <= 16 &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
+      data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidInventoryItem(data) {
+      return data.keys().hasAll([
+        'name', 'costType', 'packsOrderedTotal', 'piecesPerPack',
+        'totalPiecesAvailable', 'totalPiecesUsed', 'unitCostPerPack',
+        'lastWorkshopTitle', 'ownerId', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'name', 'costType', 'packsOrderedTotal', 'piecesPerPack',
+        'totalPiecesAvailable', 'totalPiecesUsed', 'unitCostPerPack',
+        'lastWorkshopTitle', 'ownerId', 'createdAt', 'updatedAt'
+      ]) &&
+      data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+      data.costType is string && data.costType.size() >= 1 && data.costType.size() <= 20 &&
+      data.packsOrderedTotal is number && data.packsOrderedTotal >= 0 && data.packsOrderedTotal <= 100000 &&
+      data.piecesPerPack is number && data.piecesPerPack >= 1 && data.piecesPerPack <= 100000 &&
+      data.totalPiecesAvailable is number && data.totalPiecesAvailable >= 0 && data.totalPiecesAvailable <= 1000000 &&
+      data.totalPiecesUsed is number && data.totalPiecesUsed >= 0 && data.totalPiecesUsed <= 1000000 &&
+      data.unitCostPerPack is number && data.unitCostPerPack >= 0 && data.unitCostPerPack <= 100000 &&
+      data.lastWorkshopTitle is string && data.lastWorkshopTitle.size() <= 120 &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
+      data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidDesignTemplate(data) {
+      return data.keys().hasAll([
+        'title', 'presetName', 'width', 'height',
+        'backgroundColor', 'elements', 'ownerId', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'title', 'presetName', 'width', 'height',
+        'backgroundColor', 'elements', 'ownerId', 'createdAt', 'updatedAt'
+      ]) &&
+      data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+      data.presetName is string && data.presetName.size() >= 1 && data.presetName.size() <= 80 &&
+      data.width is number && data.width >= 100 && data.width <= 10000 &&
+      data.height is number && data.height >= 100 && data.height <= 10000 &&
+      data.backgroundColor is string && data.backgroundColor.size() >= 4 && data.backgroundColor.size() <= 16 &&
+      data.elements is list && data.elements.size() <= 80 &&
+      (data.elements.size() == 0 || data.elements[0] is map) &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
+      data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    match /workshops/{workshopId} {
+      allow get: if isSignedIn() && isValidId(workshopId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(workshopId) && isValidWorkshop(incoming()) &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isSignedIn() && isValidId(workshopId) && isValidWorkshop(incoming()) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'subtitle', 'location', 'partnerId', 'dateLabel',
+          'eventDate', 'eventStartTime', 'eventDurationMinutes', 'calendarEventId',
+          'category', 'ticketPrice', 'venueFeePerPax', 'targetPax', 'calculatorLinked',
+          'phases', 'phase1Setup', 'phase2Execution', 'phase3Closing',
+          'materials', 'updatedAt'
+        ]);
+      allow delete: if isSignedIn() && isValidId(workshopId) && existing().ownerId == request.auth.uid;
+    }
+
+    match /partners/{partnerId} {
+      allow get: if isSignedIn() && isValidId(partnerId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(partnerId) && isValidPartner(incoming()) &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isSignedIn() && isValidId(partnerId) && isValidPartner(incoming()) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'whoTheyAre', 'address', 'commercialDealType',
+          'commercialDealNotes', 'defaultVenueFee', 'logoText',
+          'logoShape', 'fontStyle', 'palette', 'updatedAt'
+        ]);
+      allow delete: if isSignedIn() && isValidId(partnerId) && existing().ownerId == request.auth.uid;
+    }
+
+    match /inventory/{itemId} {
+      allow get: if isSignedIn() && isValidId(itemId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(itemId) && isValidInventoryItem(incoming()) &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isSignedIn() && isValidId(itemId) && isValidInventoryItem(incoming()) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'costType', 'packsOrderedTotal', 'piecesPerPack',
+          'totalPiecesAvailable', 'totalPiecesUsed', 'unitCostPerPack',
+          'lastWorkshopTitle', 'updatedAt'
+        ]);
+      allow delete: if isSignedIn() && isValidId(itemId) && existing().ownerId == request.auth.uid;
+    }
+
+    match /templates/{templateId} {
+      allow get: if isSignedIn() && isValidId(templateId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(templateId) && isValidDesignTemplate(incoming()) &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isSignedIn() && isValidId(templateId) && isValidDesignTemplate(incoming()) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'presetName', 'width', 'height',
+          'backgroundColor', 'elements', 'updatedAt'
+        ]);
+      allow delete: if isSignedIn() && isValidId(templateId) && existing().ownerId == request.auth.uid;
+    }
+  }
+}
