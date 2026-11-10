@@ -34,8 +34,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'npm'
-      - run: npm install
+      - run: npm install --legacy-peer-deps
       - run: npx tsx --test src/utils/erpLogic.test.ts
       - run: npm run lint
       - name: Build production bundle for GitHub Pages
