@@ -1,0 +1,69 @@
+name: Deploy Fatti a mano ERP to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+# Permessi necessari per pubblicare su GitHub Pages tramite GitHub Actions
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Permette un solo deploy attivo alla volta
+concurrency:
+  group: 'pages'
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run ERP & Vector Math Unit Tests
+        run: npx tsx --test src/utils/erpLogic.test.ts
+
+      - name: Typecheck (TypeScript)
+        run: npm run lint
+
+      - name: Build production bundle for GitHub Pages
+        env:
+          GITHUB_PAGES: 'true'
+          VITE_GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          npm run build
+          cp dist/index.html dist/404.html
+          touch dist/.nojekyll
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact for GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './dist'
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -101,9 +101,9 @@ function buildFallbackPhaseDescription(body: ImprovePhasePayload): string {
   const base = (body.currentDescription || '').trim();
   const partnerRef = body.partnerName ? ` presso ${body.partnerName}` : '';
   if (!base) {
-    return `[${body.phaseNumber} · ${body.phaseTitle}] Predisporre le ${pax} postazioni operative${partnerRef} verificando illuminazione, disposizione ordinata degli strumenti e materiali pre-dosati per ciascun partecipante. Fornire indicazioni chiare sui tempi (15–20 min) e assistere i presenti passo dopo passo mantenendo un ritmo conviviale e rilassato.`;
+    return `[Fase ${body.phaseNumber} · ${body.phaseTitle}] Accogliamo i ${pax} partecipanti${partnerRef} in un'atmosfera conviviale e rilassata (edutainment). Dopo un breve benvenuto introduttivo di 5 minuti, guidiamo il gruppo passo dopo passo: verificare che ogni postazione disponga degli strumenti pronti all'uso, mostrare la tecnica al tavolo centrale con gesti semplici e assistere ciascun ospite mantenendo i tempi operativi chiari e ben scanditi.`;
   }
-  return `${base.replace(/\.$/, '')}. Operatività sul campo (${pax} pax${partnerRef}): verificare che ogni postazione disponga del kit completo prima di iniziare la fase "${body.phaseTitle}", scandire i passaggi chiave con una dimostrazione pratica di 3 minuti al tavolo centrale e raccogliere subito gli strumenti non più necessari per lasciare spazio libero per il prosieguo dell'esperienza.`;
+  return `${base.replace(/\.$/, '')}. Approccio Edutainment & Regia Operativa (${pax} pax${partnerRef}): accogliere i partecipanti con tono caldo e inclusivo, rassicurando chi parte da zero; alternare la dimostrazione tecnica pratica (3-5 min) al supporto individuale tra i tavoli, mantenendo chiare le tempistiche e i passaggi manuali della fase "${body.phaseTitle}".`;
 }
 
 async function startServer() {
@@ -112,7 +112,7 @@ async function startServer() {
 
   app.use(express.json({ limit: '2mb' }));
 
-  // Endpoint 1: Migliora la descrizione di una singola fase del Protocollo Operativo con Gemini IA
+  // Endpoint 1: Ottimizza la descrizione di una singola fase del Protocollo Operativo con Gemini IA
   app.post('/api/gemini/improve-phase', async (req, res) => {
     const payload = req.body as ImprovePhasePayload;
     if (!payload || !payload.phaseTitle) {
@@ -130,24 +130,24 @@ async function startServer() {
     }
 
     try {
-      const prompt = `Sei il direttore operativo dei laboratori creativi edutainment "Fatti a mano".
-Riscrivi, arricchisci e rendi più chiara, pratica e ben strutturata la seguente descrizione di una fase operativa della scheda laboratorio.
+      const prompt = `Sei il direttore creativo e responsabile didattico dei laboratori "Fatti a mano" (format di edutainment artigianale dal vivo).
+Ottimizza la descrizione della seguente fase del Protocollo Operativo rendendo il tono più professionale, accogliente e orientato all'edutainment, mantenendo al tempo stesso tutte le istruzioni tecniche, le quantità e le tempistiche perfettamente chiare e strutturate per lo staff.
 
 CONTESTO LABORATORIO:
 - Laboratorio: ${payload.workshopTitle}
-- Partner / Location: ${payload.partnerName || 'Studio / Locale Partner'}
+- Partner / Location: ${payload.partnerName || 'Locale Partner'}
 - Partecipanti previsti: ${payload.targetPax || 20} pax
-- Numero e Titolo Fase: ${payload.phaseNumber} — ${payload.phaseTitle}
-- Bozza attuale scritta dall'utente: "${payload.currentDescription || 'Da definire'}"
+- Fase: ${payload.phaseNumber} — ${payload.phaseTitle}
+- Testo attuale della fase: "${payload.currentDescription || 'Da definire'}"
 
-Restituisci SOLO il testo migliorato della fase (massimo 4-5 frasi incisive e operative, indicando tempi consigliati, disposizione materiali e attenzione all'esperienza dei partecipanti, senza preamboli o markdown).`;
+Restituisci SOLO il testo ottimizzato della fase in italiano (3-5 frasi fluide, professionali, accoglienti e tecnicamente inequivocabili, senza preamboli o formattazione markdown).`;
 
       const response = await ai.models.generateContent({
         model: 'gemini-3.8-flash',
         contents: prompt,
         config: {
           systemInstruction:
-            'Rispondi in italiano con uno stile operativo, caldo, preciso e immediatamente utilizzabile dallo staff durante l\'allestimento o la conduzione del laboratorio.',
+            'Rendi il testo professionale, caloroso, accogliente e orientato all\'edutainment esperienziale, preservando con assoluta chiarezza le istruzioni tecniche, i materiali e le tempistiche operative.',
         },
       });
 

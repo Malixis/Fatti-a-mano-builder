@@ -16,6 +16,10 @@ import {
 } from '../utils/roiCalculator';
 import { exportPackingListPdf } from '../utils/pdfExporter';
 import {
+  requestPhaseTextImprovement,
+  requestWorkshopAiAssist,
+} from '../utils/aiClient';
+import {
   ArrowDown,
   ArrowRight,
   ArrowUp,
@@ -357,28 +361,16 @@ export const LabManager: React.FC<LabManagerProps> = ({
   const handleImprovePhaseWithAi = async (phase: OperationalPhase) => {
     setImprovingPhaseId(phase.id);
     try {
-      const response = await fetch('/api/gemini/improve-phase', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workshopTitle: activeWorkshop.title,
-          category: activeWorkshop.category,
-          targetPax: activeWorkshop.targetPax,
-          phaseNumber: phase.numberLabel,
-          phaseTitle: phase.title,
-          currentDescription: phase.description,
-        }),
+      const data = await requestPhaseTextImprovement({
+        workshopTitle: activeWorkshop.title,
+        category: activeWorkshop.category,
+        targetPax: activeWorkshop.targetPax,
+        phaseNumber: phase.numberLabel,
+        phaseTitle: phase.title,
+        currentDescription: phase.description,
       });
-      if (!response.ok) {
-        throw new Error('Errore durante il miglioramento IA della fase.');
-      }
-      const data = (await response.json()) as {
-        improvedDescription: string;
-        suggestedTitle?: string;
-      };
       handleUpdatePhase(phase.id, {
         description: data.improvedDescription,
-        title: data.suggestedTitle || phase.title,
       });
     } catch (e) {
       console.error(e);
@@ -484,29 +476,11 @@ export const LabManager: React.FC<LabManagerProps> = ({
     setAiLoading(true);
     setAiError(null);
     try {
-      const response = await fetch('/api/gemini/assist', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workshop: {
-            ...activeWorkshop,
-            phases: activePhases,
-          },
-          metrics: {
-            fixedCostsTotal: metrics.fixedCostsTotal,
-            variableCostPerPax: metrics.variableCostPerPax,
-            costPerPaxEvent1: metrics.costPerPaxEvent1,
-            costPerPaxSubsequent: metrics.costPerPaxSubsequent,
-            netProfitEvent1: metrics.netProfitEvent1,
-            netProfitSubsequent: metrics.netProfitSubsequent,
-            breakEvenPaxEvent1: metrics.breakEvenPaxEvent1,
-          },
-        }),
-      });
-      if (!response.ok) {
-        throw new Error('Impossibile contattare il motore IA Gemini.');
-      }
-      const data = (await response.json()) as GeminiAssistResult;
+      const data = await requestWorkshopAiAssist(
+        activeWorkshop,
+        metrics,
+        activePhases
+      );
       setAiResult(data);
     } catch (err) {
       setAiError(
@@ -519,7 +493,7 @@ export const LabManager: React.FC<LabManagerProps> = ({
 
   const handleCopyCaption = () => {
     if (!aiResult?.instagramCaption) return;
-    navigator.clipboard?.writeText(aiResult.instagramCaption);
+    navigator.clipboard?.writeText(aiResult.instagramCaption).catch(() => {});
     setCopiedCopy(true);
     setTimeout(() => setCopiedCopy(false), 2000);
   };

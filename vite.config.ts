@@ -4,7 +4,12 @@ import path from 'path';
 import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
+  const isGitHubPages = process.env.GITHUB_PAGES === 'true';
+
   return {
+    // Usa base relativa './' durante la build per GitHub Actions / GitHub Pages
+    // così il sito funziona sia su dominio root sia su sottocartella /nome-repo/
+    base: isGitHubPages ? './' : '/',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
