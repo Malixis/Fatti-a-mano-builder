@@ -10,6 +10,7 @@ import {
   StampKind,
   TextureFilterType,
   VectorElement,
+  WorkshopCard,
 } from '../types/erp';
 import {
   buildPartnerVectorAssets,
@@ -57,12 +58,19 @@ interface GraphicBuilderProps {
   setCanvasSize: React.Dispatch<
     React.SetStateAction<{ width: number; height: number; presetId: CanvasPresetId }>
   >;
+  backgroundColor?: BrandColorHex;
+  setBackgroundColor?: (color: BrandColorHex) => void;
+  workshops?: WorkshopCard[];
+  activeWorkshopId?: string;
+  onSelectWorkshop?: (workshopId: string) => void;
+  onResetToWorkshopDefault?: () => void;
   partners: PartnerProfile[];
   selectedPartnerId: string;
   onSelectPartner: (partnerId: string) => void;
   onOpenFontModal: () => void;
   onSaveTemplateCloud?: () => void;
   isSavingCloud?: boolean;
+  lastSavedLabel?: string;
 }
 
 const STAMP_CATALOG: Array<{ id: StampKind; label: string }> = [
@@ -81,16 +89,30 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
   setClipboard,
   canvasSize,
   setCanvasSize,
+  backgroundColor: externalBgColor,
+  setBackgroundColor: setExternalBgColor,
+  workshops = [],
+  activeWorkshopId = '',
+  onSelectWorkshop,
+  onResetToWorkshopDefault,
   partners,
   selectedPartnerId,
   onSelectPartner,
   onOpenFontModal,
   onSaveTemplateCloud,
   isSavingCloud,
+  lastSavedLabel,
 }) => {
   const [activeTool, setActiveTool] = useState<DrawingToolId>('brush');
   const [activeColor, setActiveColor] = useState<BrandColorHex>('#B85B43');
-  const [backgroundColor, setBackgroundColor] = useState<BrandColorHex>('#EADDCD');
+  const [localBgColor, setLocalBgColor] = useState<BrandColorHex>('#EADDCD');
+  const backgroundColor = externalBgColor || localBgColor;
+  const setBackgroundColor = (hex: BrandColorHex) => {
+    setLocalBgColor(hex);
+    if (setExternalBgColor) {
+      setExternalBgColor(hex);
+    }
+  };
   const [activeTexture, setActiveTexture] = useState<TextureFilterType>('rough-brush');
   const [activeStamp, setActiveStamp] = useState<StampKind>('seal-fatti-a-mano');
   const [brushSize, setBrushSize] = useState<number>(22);
@@ -696,10 +718,37 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
 
   return (
     <div className="space-y-4">
-      {/* Barra Superiore del Builder: Preset Dimensioni, Dropdown Partner Brand Kit, Zoom e Esportazione */}
+      {/* Barra Superiore del Builder: Selettore Scheda Associata, Preset Dimensioni, Dropdown Partner Brand Kit, Zoom e Esportazione */}
       <div className="bg-[#F4ECE1] border border-[#1A2B4C]/15 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
         {/* Preset rapidi & Input L x A */}
         <div className="flex flex-wrap items-center gap-2">
+          {workshops.length > 0 && onSelectWorkshop && (
+            <div className="flex items-center gap-2 bg-[#EADDCD] px-3 py-1.5 rounded-lg border border-[#1A2B4C]/25">
+              <label
+                htmlFor="builder-workshop-select"
+                className="text-xs font-bold text-[#1A2B4C] whitespace-nowrap"
+              >
+                Progetto Scheda:
+              </label>
+              <select
+                id="builder-workshop-select"
+                data-testid="builder-workshop-select"
+                value={activeWorkshopId}
+                onChange={(e) => {
+                  setSelectedId(null);
+                  onSelectWorkshop(e.target.value);
+                }}
+                className="bg-transparent text-xs font-semibold text-[#1A2B4C] focus:outline-none cursor-pointer max-w-[220px] truncate"
+              >
+                {workshops.map((ws) => (
+                  <option key={ws.id} value={ws.id}>
+                    {ws.title} ({ws.ticketPrice}€)
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <span className="text-xs font-bold text-[#1A2B4C] mr-1">Formato Canvas:</span>
           {CANVAS_PRESETS.map((preset) => (
             <button
@@ -791,6 +840,15 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
 
         {/* Controlli Zoom & Export Alta Risoluzione */}
         <div className="flex flex-wrap items-center gap-2">
+          {lastSavedLabel && (
+            <span
+              data-testid="builder-autosave-status"
+              className="text-[11px] font-medium text-[#4A6B53] whitespace-nowrap mr-1"
+            >
+              {lastSavedLabel}
+            </span>
+          )}
+
           <div className="flex items-center bg-[#EADDCD] rounded-lg border border-[#1A2B4C]/15 p-0.5">
             <button
               type="button"
@@ -824,6 +882,21 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
               <Maximize2 className="w-3.5 h-3.5" />
             </button>
           </div>
+
+          {onResetToWorkshopDefault && (
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedId(null);
+                onResetToWorkshopDefault();
+              }}
+              title="Rigenera il layout predefinito dai dati della scheda"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-[#EADDCD] border border-[#1A2B4C]/25 text-[#1A2B4C] text-xs font-semibold rounded-lg hover:bg-[#1A2B4C]/10 transition-colors whitespace-nowrap"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Rigenera Base</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -862,6 +935,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
           {onSaveTemplateCloud && (
             <button
               type="button"
+              data-testid="builder-save-cloud-btn"
               onClick={onSaveTemplateCloud}
               disabled={isSavingCloud}
               className="px-3 py-1.5 bg-[#4A6B53] text-[#EADDCD] text-xs font-semibold rounded-lg hover:bg-[#3d5945] transition-colors whitespace-nowrap disabled:opacity-50"

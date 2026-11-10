@@ -1,19 +1,23 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { User } from 'firebase/auth';
 import {
+  BrandColorHex,
   CanvasPresetId,
   InventoryItem,
   PartnerProfile,
   VectorElement,
   WorkshopCard,
+  WorkshopPosterDesign,
 } from './types/erp';
 import {
   INITIAL_INVENTORY,
   INITIAL_PARTNERS,
-  INITIAL_POSTER_STATE,
   INITIAL_WORKSHOPS,
 } from './data/seedWorkshops';
-import { buildPosterFromWorkshop } from './utils/vectorMath';
+import {
+  createDefaultWorkshopDesign,
+  syncPosterElementsWithWorkshop,
+} from './utils/vectorMath';
 import { mergeConfirmedMaterialsIntoInventory } from './utils/roiCalculator';
 import { GraphicBuilder } from './components/GraphicBuilder';
 import { FontTextureEngine } from './components/FontTextureEngine';
@@ -24,6 +28,7 @@ import {
   FIREBASE_PROJECT_ID,
   deleteInventoryItemFromCloud,
   deletePartnerFromCloud,
+  deleteTemplateFromCloud,
   deleteWorkshopFromCloud,
   isUnauthorizedDomainError,
   loginWithGoogle,
@@ -35,6 +40,7 @@ import {
   subscribeToAuth,
   subscribeUserInventory,
   subscribeUserPartners,
+  subscribeUserTemplates,
   subscribeUserWorkshops,
   syncWorkshopToGoogleCalendar,
 } from './firebase';
@@ -43,14 +49,22 @@ import { Check, Copy, ExternalLink, ShieldAlert, X } from 'lucide-react';
 type ActiveModuleTab = 'lab-manager' | 'graphic-builder' | 'font-engine' | 'setup-docs';
 
 const STORAGE_KEYS = {
-  WORKSHOPS: 'fatti_a_mano_workshops_v2',
-  PARTNERS: 'fatti_a_mano_partners_v2',
-  INVENTORY: 'fatti_a_mano_inventory_v2',
+  WORKSHOPS: 'fatti_a_mano_workshops_v3',
+  PARTNERS: 'fatti_a_mano_partners_v3',
+  INVENTORY: 'fatti_a_mano_inventory_v3',
+  DESIGNS: 'fatti_a_mano_designs_v3',
+  ACTIVE_WORKSHOP_ID: 'fatti_a_mano_active_ws_v3',
+  // Chiavi v2 per migrazione trasparente
+  LEGACY_WORKSHOPS: 'fatti_a_mano_workshops_v2',
+  LEGACY_PARTNERS: 'fatti_a_mano_partners_v2',
+  LEGACY_INVENTORY: 'fatti_a_mano_inventory_v2',
 };
 
-function loadLocal<T>(key: string, fallback: T): T {
+function loadLocal<T>(key: string, fallback: T, legacyKey?: string): T {
   try {
-    const raw = window.localStorage.getItem(key);
+    const raw =
+      window.localStorage.getItem(key) ||
+      (legacyKey ? window.localStorage.getItem(legacyKey) : null);
     if (!raw) return fallback;
     const parsed = JSON.parse(raw) as T;
     return parsed || fallback;
@@ -59,44 +73,127 @@ function loadLocal<T>(key: string, fallback: T): T {
   }
 }
 
+function buildInitialDesignsMap(
+  workshops: WorkshopCard[],
+  partners: PartnerProfile[]
+): Record<string, WorkshopPosterDesign> {
+  const saved = loadLocal<Record<string, WorkshopPosterDesign> | null>(
+    STORAGE_KEYS.DESIGNS,
+    null
+  );
+  const map: Record<string, WorkshopPosterDesign> = saved ? { ...saved } : {};
+
+  for (const ws of workshops) {
+    if (!map[ws.id] || !Array.isArray(map[ws.id].elements)) {
+      const partner = partners.find((p) => p.id === ws.partnerId);
+      map[ws.id] = createDefaultWorkshopDesign(ws, partner, 0);
+    }
+  }
+  return map;
+}
+
+/**
+ * Unisce in modo sicuro gli elementi locali con quelli provenienti da Cloud Firestore (`onSnapshot`),
+ * confrontando `clientUpdatedAt` per impedire che uno snapshot più vecchio ripristini o cancelli
+ * le modifiche appena effettuate dall'utente.
+ */
+function mergeByTimestamp<T extends { id: string; clientUpdatedAt?: number }>(
+  localList: T[],
+  cloudList: T[],
+  deletedIds: Set<string>
+): { merged: T[]; localNewerToPush: T[] } {
+  if (cloudList.length === 0) {
+    const localModified = localList.filter((item) => (item.clientUpdatedAt || 0) > 0);
+    return { merged: localList, localNewerToPush: localModified };
+  }
+
+  const cloudMap = new Map<string, T>();
+  for (const c of cloudList) {
+    if (!deletedIds.has(c.id)) {
+      cloudMap.set(c.id, c);
+    }
+  }
+
+  const mergedMap = new Map<string, T>();
+  const localNewerToPush: T[] = [];
+
+  // 1. Esamina gli elementi locali
+  for (const localItem of localList) {
+    if (deletedIds.has(localItem.id)) continue;
+    const cloudItem = cloudMap.get(localItem.id);
+    const localTs = Number(localItem.clientUpdatedAt) || 0;
+
+    if (cloudItem) {
+      const cloudTs = Number(cloudItem.clientUpdatedAt) || 1;
+      if (localTs > cloudTs) {
+        mergedMap.set(localItem.id, localItem);
+        localNewerToPush.push(localItem);
+      } else {
+        mergedMap.set(localItem.id, cloudItem);
+      }
+      cloudMap.delete(localItem.id);
+    } else if (localTs > 0) {
+      // L'utente ha modificato o creato questo elemento in locale prima/durante la sessione: conservalo!
+      mergedMap.set(localItem.id, localItem);
+      localNewerToPush.push(localItem);
+    }
+  }
+
+  // 2. Aggiungi tutti gli elementi presenti sul Cloud da altri dispositivi
+  for (const [id, cloudItem] of cloudMap.entries()) {
+    mergedMap.set(id, cloudItem);
+  }
+
+  const merged = Array.from(mergedMap.values());
+  return {
+    merged: merged.length > 0 ? merged : localList,
+    localNewerToPush,
+  };
+}
+
+function formatNowTime(): string {
+  return new Date().toLocaleTimeString('it-IT', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveModuleTab>('lab-manager');
   const [workshops, setWorkshops] = useState<WorkshopCard[]>(() =>
-    loadLocal(STORAGE_KEYS.WORKSHOPS, INITIAL_WORKSHOPS)
+    loadLocal(STORAGE_KEYS.WORKSHOPS, INITIAL_WORKSHOPS, STORAGE_KEYS.LEGACY_WORKSHOPS)
   );
   const [partners, setPartners] = useState<PartnerProfile[]>(() =>
-    loadLocal(STORAGE_KEYS.PARTNERS, INITIAL_PARTNERS)
+    loadLocal(STORAGE_KEYS.PARTNERS, INITIAL_PARTNERS, STORAGE_KEYS.LEGACY_PARTNERS)
   );
   const [inventory, setInventory] = useState<InventoryItem[]>(() =>
-    loadLocal(STORAGE_KEYS.INVENTORY, INITIAL_INVENTORY)
+    loadLocal(STORAGE_KEYS.INVENTORY, INITIAL_INVENTORY, STORAGE_KEYS.LEGACY_INVENTORY)
   );
 
-  const [activeWorkshopId, setActiveWorkshopId] = useState<string>(
-    () => workshops[0]?.id || INITIAL_WORKSHOPS[0].id
-  );
-  const [selectedBuilderPartnerId, setSelectedBuilderPartnerId] = useState<string>(
-    () => workshops[0]?.partnerId || INITIAL_PARTNERS[0].id
-  );
-
-  const [canvasElements, setCanvasElements] = useState<VectorElement[]>(
-    INITIAL_POSTER_STATE.canvasElements
-  );
-  const [clipboardAssets, setClipboardAssets] = useState<VectorElement[]>(
-    INITIAL_POSTER_STATE.clipboardAssets
-  );
-  const [canvasSize, setCanvasSize] = useState<{
-    width: number;
-    height: number;
-    presetId: CanvasPresetId;
-  }>({
-    width: 1080,
-    height: 1350,
-    presetId: '1080x1350',
+  const [activeWorkshopId, setActiveWorkshopId] = useState<string>(() => {
+    const savedId = loadLocal<string>(STORAGE_KEYS.ACTIVE_WORKSHOP_ID, '');
+    if (savedId && workshops.some((w) => w.id === savedId)) {
+      return savedId;
+    }
+    return workshops[0]?.id || INITIAL_WORKSHOPS[0].id;
   });
+
+  // Dizionario delle locandine del Builder Grafico indicizzato per `workshopId`
+  const [designsByWorkshopId, setDesignsByWorkshopId] = useState<
+    Record<string, WorkshopPosterDesign>
+  >(() => buildInitialDesignsMap(workshops, partners));
 
   const [user, setUser] = useState<User | null>(null);
   const [isSavingCloud, setIsSavingCloud] = useState<boolean>(false);
   const [bridgeBanner, setBridgeBanner] = useState<string | null>(null);
+  const [lastSavedLabel, setLastSavedLabel] = useState<string>(
+    'Salvataggio automatico attivo'
+  );
+
+  // Traccia gli ID eliminati intenzionalmente nella sessione per non ri-importarli da snapshot pendenti
+  const deletedIdsRef = useRef<Set<string>>(new Set());
+  const autoSaveTimerRef = useRef<number | null>(null);
 
   // Stato Modale Guidato per Errore Firebase auth/unauthorized-domain (es. su GitHub Pages)
   const [showDomainModal, setShowDomainModal] = useState<boolean>(false);
@@ -113,7 +210,22 @@ export default function App() {
     setTimeout(() => setCopiedDomain(false), 2200);
   };
 
-  // Salvataggio automatico su localStorage per persistenza immediata
+  // Scheda attiva e locandina attiva del Builder
+  const activeWorkshop = useMemo(
+    () => workshops.find((w) => w.id === activeWorkshopId) || workshops[0],
+    [workshops, activeWorkshopId]
+  );
+
+  const activeDesign: WorkshopPosterDesign = useMemo(() => {
+    const existing = designsByWorkshopId[activeWorkshop.id];
+    if (existing && Array.isArray(existing.elements)) {
+      return existing;
+    }
+    const partner = partners.find((p) => p.id === activeWorkshop.partnerId);
+    return createDefaultWorkshopDesign(activeWorkshop, partner, 0);
+  }, [designsByWorkshopId, activeWorkshop, partners]);
+
+  // Persistenza immediata su localStorage ad ogni modifica (Schede, Partner, Inventario, Builder Designs)
   useEffect(() => {
     try {
       window.localStorage.setItem(STORAGE_KEYS.WORKSHOPS, JSON.stringify(workshops));
@@ -138,6 +250,165 @@ export default function App() {
     }
   }, [inventory]);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        STORAGE_KEYS.DESIGNS,
+        JSON.stringify(designsByWorkshopId)
+      );
+    } catch {
+      // ignore
+    }
+  }, [designsByWorkshopId]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        STORAGE_KEYS.ACTIVE_WORKSHOP_ID,
+        JSON.stringify(activeWorkshopId)
+      );
+    } catch {
+      // ignore
+    }
+  }, [activeWorkshopId]);
+
+  // Pianifica un salvataggio automatico debounced su Cloud Firestore quando l'utente modifica Scheda o Builder
+  const scheduleCloudAutoSave = (
+    nextWorkshop?: WorkshopCard,
+    nextDesign?: WorkshopPosterDesign
+  ) => {
+    const timeStr = formatNowTime();
+    setLastSavedLabel(
+      user
+        ? `Salvato in automatico · Cloud (${timeStr})`
+        : `Salvato in automatico · Locale (${timeStr})`
+    );
+
+    if (!user) return;
+
+    if (autoSaveTimerRef.current) {
+      window.clearTimeout(autoSaveTimerRef.current);
+    }
+    const targetUser = user;
+    const wsToSave = nextWorkshop;
+    const designToSave = nextDesign;
+
+    autoSaveTimerRef.current = window.setTimeout(() => {
+      if (wsToSave) {
+        saveWorkshopToCloud(wsToSave, targetUser, false).catch((e) =>
+          console.error(e)
+        );
+      }
+      if (designToSave) {
+        saveTemplateToCloud(designToSave, targetUser).catch((e) =>
+          console.error(e)
+        );
+      }
+    }, 650);
+  };
+
+  // Helpers di mutazione per il Builder Grafico (associati alla Scheda Laboratorio attiva)
+  const updateActiveDesign = (
+    updater: (prev: WorkshopPosterDesign) => WorkshopPosterDesign
+  ) => {
+    const wsId = activeWorkshop.id;
+    setDesignsByWorkshopId((prevMap) => {
+      const current =
+        prevMap[wsId] ||
+        createDefaultWorkshopDesign(
+          activeWorkshop,
+          partners.find((p) => p.id === activeWorkshop.partnerId),
+          0
+        );
+      const updated: WorkshopPosterDesign = {
+        ...updater(current),
+        id: `tpl-${wsId}`,
+        workshopId: wsId,
+        clientUpdatedAt: Date.now(),
+      };
+      scheduleCloudAutoSave(undefined, updated);
+      return {
+        ...prevMap,
+        [wsId]: updated,
+      };
+    });
+  };
+
+  const setCanvasElements: React.Dispatch<React.SetStateAction<VectorElement[]>> = (
+    action
+  ) => {
+    updateActiveDesign((current) => {
+      const nextElements =
+        typeof action === 'function' ? action(current.elements) : action;
+      return {
+        ...current,
+        elements: nextElements,
+      };
+    });
+  };
+
+  const setClipboardAssets: React.Dispatch<React.SetStateAction<VectorElement[]>> = (
+    action
+  ) => {
+    updateActiveDesign((current) => {
+      const nextClipboard =
+        typeof action === 'function' ? action(current.clipboard) : action;
+      return {
+        ...current,
+        clipboard: nextClipboard,
+      };
+    });
+  };
+
+  const setCanvasSize: React.Dispatch<
+    React.SetStateAction<{ width: number; height: number; presetId: CanvasPresetId }>
+  > = (action) => {
+    updateActiveDesign((current) => {
+      const prevSize = {
+        width: current.width,
+        height: current.height,
+        presetId: current.presetName,
+      };
+      const nextSize = typeof action === 'function' ? action(prevSize) : action;
+      return {
+        ...current,
+        width: nextSize.width,
+        height: nextSize.height,
+        presetName: nextSize.presetId,
+      };
+    });
+  };
+
+  const setCanvasBackgroundColor = (color: BrandColorHex) => {
+    updateActiveDesign((current) => ({
+      ...current,
+      backgroundColor: color,
+    }));
+  };
+
+  const handleSelectBuilderPartner = (partnerId: string) => {
+    updateActiveDesign((current) => ({
+      ...current,
+      partnerId,
+    }));
+  };
+
+  const handleResetActiveDesignToDefault = () => {
+    const partner = partners.find(
+      (p) => p.id === (activeDesign.partnerId || activeWorkshop.partnerId)
+    );
+    const fresh = createDefaultWorkshopDesign(activeWorkshop, partner, Date.now());
+    setDesignsByWorkshopId((prev) => ({
+      ...prev,
+      [activeWorkshop.id]: fresh,
+    }));
+    scheduleCloudAutoSave(undefined, fresh);
+    setBridgeBanner(
+      `Layout base della locandina "${activeWorkshop.title}" rigenerato dai dati della scheda.`
+    );
+    setTimeout(() => setBridgeBanner(null), 3500);
+  };
+
   // Autenticazione Google Firebase e sincronizzazione cross-device ("Ricordati l'account")
   useEffect(() => {
     const unsubAuth = subscribeToAuth((currentUser) => {
@@ -151,47 +422,139 @@ export default function App() {
 
   useEffect(() => {
     if (!user) return;
+
     const unsubWorkshops = subscribeUserWorkshops(user.uid, (cloudItems) => {
-      if (cloudItems.length > 0) {
-        setWorkshops(cloudItems);
-        setActiveWorkshopId((prevId) =>
-          cloudItems.some((w) => w.id === prevId) ? prevId : cloudItems[0].id
+      setWorkshops((prevLocal) => {
+        const { merged, localNewerToPush } = mergeByTimestamp(
+          prevLocal,
+          cloudItems,
+          deletedIdsRef.current
         );
-      }
+        for (const item of localNewerToPush) {
+          saveWorkshopToCloud(item, user, false).catch((e) => console.error(e));
+        }
+        setActiveWorkshopId((prevId) =>
+          merged.some((w) => w.id === prevId) ? prevId : merged[0]?.id || prevId
+        );
+        return merged;
+      });
     });
+
     const unsubPartners = subscribeUserPartners(user.uid, (cloudPartners) => {
-      if (cloudPartners.length > 0) {
-        setPartners(cloudPartners);
-      }
+      setPartners((prevLocal) => {
+        const { merged, localNewerToPush } = mergeByTimestamp(
+          prevLocal,
+          cloudPartners,
+          deletedIdsRef.current
+        );
+        for (const p of localNewerToPush) {
+          savePartnerToCloud(p, user).catch((e) => console.error(e));
+        }
+        return merged;
+      });
     });
+
     const unsubInventory = subscribeUserInventory(user.uid, (cloudInv) => {
-      if (cloudInv.length > 0) {
-        setInventory(cloudInv);
-      }
+      setInventory((prevLocal) => {
+        const { merged, localNewerToPush } = mergeByTimestamp(
+          prevLocal,
+          cloudInv,
+          deletedIdsRef.current
+        );
+        for (const inv of localNewerToPush) {
+          saveInventoryItemToCloud(inv, user).catch((e) => console.error(e));
+        }
+        return merged;
+      });
     });
+
+    const unsubTemplates = subscribeUserTemplates(user.uid, (cloudTemplates) => {
+      setDesignsByWorkshopId((prevMap) => {
+        const nextMap: Record<string, WorkshopPosterDesign> = { ...prevMap };
+        const toPush: WorkshopPosterDesign[] = [];
+
+        const cloudByWsId = new Map<string, WorkshopPosterDesign>();
+        for (const tpl of cloudTemplates) {
+          const wsId = tpl.workshopId || tpl.id.replace(/^tpl-/, '');
+          if (!deletedIdsRef.current.has(wsId) && !deletedIdsRef.current.has(tpl.id)) {
+            cloudByWsId.set(wsId, { ...tpl, workshopId: wsId, id: `tpl-${wsId}` });
+          }
+        }
+
+        // Confronta ogni design locale con quello Cloud
+        for (const [wsId, localDesign] of Object.entries(nextMap)) {
+          const cloudDesign = cloudByWsId.get(wsId);
+          const localTs = Number(localDesign.clientUpdatedAt) || 0;
+          if (cloudDesign) {
+            const cloudTs = Number(cloudDesign.clientUpdatedAt) || 1;
+            if (localTs > cloudTs) {
+              nextMap[wsId] = localDesign;
+              toPush.push(localDesign);
+            } else {
+              nextMap[wsId] = cloudDesign;
+            }
+            cloudByWsId.delete(wsId);
+          } else if (localTs > 0) {
+            toPush.push(localDesign);
+          }
+        }
+
+        // Aggiungi design presenti solo sul Cloud (es. creati su iPad Pro o altro dispositivo)
+        for (const [wsId, cloudDesign] of cloudByWsId.entries()) {
+          nextMap[wsId] = cloudDesign;
+        }
+
+        for (const d of toPush) {
+          saveTemplateToCloud(d, user).catch((e) => console.error(e));
+        }
+
+        return nextMap;
+      });
+    });
+
     return () => {
       unsubWorkshops();
       unsubPartners();
       unsubInventory();
+      unsubTemplates();
     };
   }, [user]);
 
-  const handleUpdateWorkshop = (updated: WorkshopCard) => {
+  const handleUpdateWorkshop = (updatedRaw: WorkshopCard) => {
+    const now = Date.now();
+    const updated: WorkshopCard = {
+      ...updatedRaw,
+      clientUpdatedAt: now,
+    };
+
     setWorkshops((prev) =>
       prev.map((w) => (w.id === updated.id ? updated : w))
     );
-    if (updated.partnerId) {
-      setSelectedBuilderPartnerId(updated.partnerId);
-    }
-    if (user) {
-      saveWorkshopToCloud(updated, user, false).catch((e) => console.error(e));
-    }
+
+    const partner = partners.find((p) => p.id === updated.partnerId);
+
+    // Aggiorna i testi collegati nella locandina di questa scheda preservando tutti i disegni e le modifiche del Builder
+    setDesignsByWorkshopId((prevMap) => {
+      const existing =
+        prevMap[updated.id] || createDefaultWorkshopDesign(updated, partner, 0);
+      const syncedDesign = syncPosterElementsWithWorkshop(
+        existing,
+        updated,
+        partner
+      );
+      scheduleCloudAutoSave(updated, syncedDesign);
+      return {
+        ...prevMap,
+        [updated.id]: syncedDesign,
+      };
+    });
   };
 
   const handleCreateWorkshop = () => {
+    const now = Date.now();
     const defaultPartner = partners[0];
     const newWs: WorkshopCard = {
-      id: `ws-${Date.now()}`,
+      id: `ws-${now}`,
       title: 'Ceramica & Calici — Tazzine Pizzicate',
       subtitle: 'Modella a mano libera la tua tazzina da caffè in gres',
       location: defaultPartner
@@ -207,9 +570,10 @@ export default function App() {
       venueFeePerPax: defaultPartner?.defaultVenueFee ?? 7,
       targetPax: 20,
       calculatorLinked: true,
+      clientUpdatedAt: now,
       phases: [
         {
-          id: `ph-${Date.now()}-1`,
+          id: `ph-${now}-1`,
           numberLabel: '01',
           title: 'Preparazione Panetti & Postazioni Kraft',
           durationLabel: 'Pre-evento (-30 min)',
@@ -217,7 +581,7 @@ export default function App() {
             'Preparare 20 panetti di argilla gres maculata da 350g ciascuno, ciotoline con barbottina, stecche in bosso e spugnette umide su tovagliette Kraft.',
         },
         {
-          id: `ph-${Date.now()}-2`,
+          id: `ph-${now}-2`,
           numberLabel: '02',
           title: 'Modellazione Pinch Pot & Ingobbi',
           durationLabel: 'Esecuzione (70 min)',
@@ -225,7 +589,7 @@ export default function App() {
             'Tecnica del pizzicato (Pinch Pot): apertura della sfera col pollice, assottigliamento pareti, applicazione manico organico e decorazione con ingobbi Terracotta e Blu Notte.',
         },
         {
-          id: `ph-${Date.now()}-3`,
+          id: `ph-${now}-3`,
           numberLabel: '03',
           title: 'Punzonatura & Calice Conviviale',
           durationLabel: 'Chiusura (30 min)',
@@ -241,7 +605,7 @@ export default function App() {
         'Punzonatura del fondo con timbro "Fatti a mano" e iniziali del partecipante. Aperitivo conviviale mentre le tazzine vengono catalogate per la cottura.',
       materials: [
         {
-          id: `m-${Date.now()}-1`,
+          id: `m-${now}-1`,
           name: 'Kit 20 mirette e stecche in legno + 20 tavolieri',
           unitCost: 4.0,
           quantity: 20,
@@ -252,7 +616,7 @@ export default function App() {
           confirmedForInventory: true,
         },
         {
-          id: `m-${Date.now()}-2`,
+          id: `m-${now}-2`,
           name: 'Argilla gres + ingobbi + quota cottura forno (per pax)',
           unitCost: 3.4,
           quantity: 1,
@@ -264,21 +628,43 @@ export default function App() {
         },
       ],
     };
+
+    const newDesign = createDefaultWorkshopDesign(newWs, defaultPartner, now);
+
     setWorkshops((prev) => [...prev, newWs]);
+    setDesignsByWorkshopId((prev) => ({
+      ...prev,
+      [newWs.id]: newDesign,
+    }));
     setActiveWorkshopId(newWs.id);
+    setLastSavedLabel(
+      user
+        ? `Salvato in automatico · Cloud (${formatNowTime()})`
+        : `Salvato in automatico · Locale (${formatNowTime()})`
+    );
+
     if (user) {
       saveWorkshopToCloud(newWs, user, true).catch((e) => console.error(e));
+      saveTemplateToCloud(newDesign, user).catch((e) => console.error(e));
     }
   };
 
   const handleDeleteWorkshop = async (id: string) => {
     if (workshops.length <= 1) return;
+    deletedIdsRef.current.add(id);
+    deletedIdsRef.current.add(`tpl-${id}`);
     const remaining = workshops.filter((w) => w.id !== id);
     setWorkshops(remaining);
+    setDesignsByWorkshopId((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     setActiveWorkshopId(remaining[0].id);
     if (user) {
       try {
         await deleteWorkshopFromCloud(id);
+        await deleteTemplateFromCloud(`tpl-${id}`);
       } catch (e) {
         console.error(e);
       }
@@ -286,14 +672,18 @@ export default function App() {
   };
 
   // Gestione Partner (Locale + Cloud)
-  const handleSavePartner = async (partner: PartnerProfile) => {
+  const handleSavePartner = async (partnerRaw: PartnerProfile) => {
+    const partner: PartnerProfile = {
+      ...partnerRaw,
+      clientUpdatedAt: Date.now(),
+    };
     setPartners((prev) => {
       const exists = prev.some((p) => p.id === partner.id);
       return exists
         ? prev.map((p) => (p.id === partner.id ? partner : p))
         : [...prev, partner];
     });
-    setSelectedBuilderPartnerId(partner.id);
+    handleSelectBuilderPartner(partner.id);
     setBridgeBanner(
       `Partner "${partner.name}" salvato con Logo ${partner.logoText}, Font ${partner.fontStyle} e Palette ${partner.palette.join(' ')}!`
     );
@@ -309,9 +699,10 @@ export default function App() {
   };
 
   const handleDeletePartner = async (partnerId: string) => {
+    deletedIdsRef.current.add(partnerId);
     setPartners((prev) => prev.filter((p) => p.id !== partnerId));
-    if (selectedBuilderPartnerId === partnerId) {
-      setSelectedBuilderPartnerId('');
+    if (activeDesign.partnerId === partnerId) {
+      handleSelectBuilderPartner('');
     }
     if (user) {
       try {
@@ -328,7 +719,8 @@ export default function App() {
       inventory,
       workshop.materials,
       workshop.targetPax,
-      workshop.title
+      workshop.title,
+      workshop.calculatorLinked ?? true
     );
     setInventory(merged);
     if (user) {
@@ -339,6 +731,7 @@ export default function App() {
   };
 
   const handleDeleteInventoryItem = async (itemId: string) => {
+    deletedIdsRef.current.add(itemId);
     setInventory((prev) => prev.filter((i) => i.id !== itemId));
     if (user) {
       try {
@@ -373,109 +766,150 @@ export default function App() {
   };
 
   // Modulo 3: Il Ponte Data-Binding ("Genera Locandina")
+  // Aggiorna i testi della locandina preservando eventuali disegni/livelli già creati dall'utente nel Builder!
   const handleGeneratePosterBridge = (
     workshop: WorkshopCard,
     partner?: PartnerProfile
   ) => {
-    const generated = buildPosterFromWorkshop(workshop, partner);
-    setCanvasSize({
-      width: 1080,
-      height: 1350,
-      presetId: '1080x1350',
-    });
-    if (partner) {
-      setSelectedBuilderPartnerId(partner.id);
-    }
-    setCanvasElements(generated.canvasElements);
-    setClipboardAssets(generated.clipboardAssets);
+    const existing = designsByWorkshopId[workshop.id];
+    const nextDesign =
+      existing && existing.elements.length > 0
+        ? syncPosterElementsWithWorkshop(existing, workshop, partner)
+        : createDefaultWorkshopDesign(workshop, partner, Date.now());
+
+    setDesignsByWorkshopId((prev) => ({
+      ...prev,
+      [workshop.id]: nextDesign,
+    }));
+    scheduleCloudAutoSave(workshop, nextDesign);
     setActiveTab('graphic-builder');
     setBridgeBanner(
-      `Locandina 1080×1350 generata da "${workshop.title}" (${workshop.ticketPrice}€ · ${workshop.location})${
-        partner ? ` con Brand Kit Partner "${partner.name}"` : ''
-      }!`
+      `Locandina di "${workshop.title}" (${workshop.ticketPrice}€ · ${workshop.location}) sincronizzata nel Builder preservando tutti i tuoi livelli!`
     );
     setTimeout(() => setBridgeBanner(null), 5000);
   };
 
-  const handleSaveWorkshopCloud = async (workshop: WorkshopCard) => {
-    const syncAllForUser = async (targetUser: User) => {
-      setIsSavingCloud(true);
-      try {
-        await saveWorkshopToCloud(workshop, targetUser, false);
-        for (const p of partners) {
-          await savePartnerToCloud(p, targetUser);
-        }
-        for (const inv of inventory) {
-          await saveInventoryItemToCloud(inv, targetUser);
-        }
-        setBridgeBanner(
-          'Schede laboratorio, Partner e Inventario Format sincronizzati sul tuo Account Google!'
-        );
-      } catch (e) {
-        console.error(e);
-      } finally {
-        setIsSavingCloud(false);
-        setTimeout(() => setBridgeBanner(null), 4000);
+  // Salvataggio completo (Schede + Locandine Builder + Partner + Inventario) senza mai ripristinare vecchi dati
+  const syncAllStateToCloud = async (
+    targetUser: User,
+    explicitWorkshop?: WorkshopCard
+  ) => {
+    setIsSavingCloud(true);
+    try {
+      const now = Date.now();
+      const currentWorkshops = explicitWorkshop
+        ? workshops.map((w) =>
+            w.id === explicitWorkshop.id
+              ? { ...explicitWorkshop, clientUpdatedAt: now }
+              : w
+          )
+        : workshops;
+
+      if (explicitWorkshop) {
+        setWorkshops(currentWorkshops);
       }
-    };
+
+      for (const ws of currentWorkshops) {
+        await saveWorkshopToCloud(
+          { ...ws, clientUpdatedAt: Math.max(now, ws.clientUpdatedAt || 0) },
+          targetUser,
+          false
+        );
+      }
+
+      for (const design of Object.values(designsByWorkshopId)) {
+        await saveTemplateToCloud(
+          {
+            ...design,
+            clientUpdatedAt: Math.max(now, design.clientUpdatedAt || 0),
+          },
+          targetUser
+        );
+      }
+
+      for (const p of partners) {
+        await savePartnerToCloud(
+          { ...p, clientUpdatedAt: Math.max(now, p.clientUpdatedAt || 0) },
+          targetUser
+        );
+      }
+
+      for (const inv of inventory) {
+        await saveInventoryItemToCloud(
+          { ...inv, clientUpdatedAt: Math.max(now, inv.clientUpdatedAt || 0) },
+          targetUser
+        );
+      }
+
+      const timeStr = formatNowTime();
+      setLastSavedLabel(`Sincronizzato su Cloud (${timeStr})`);
+      setBridgeBanner(
+        'Schede Laboratorio, Locandine del Builder Grafico, Partner e Inventario salvati sul tuo Account Google!'
+      );
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsSavingCloud(false);
+      setTimeout(() => setBridgeBanner(null), 4000);
+    }
+  };
+
+  const handleSaveWorkshopCloud = async (workshop: WorkshopCard) => {
+    const now = Date.now();
+    const stamped: WorkshopCard = { ...workshop, clientUpdatedAt: now };
+    setWorkshops((prev) =>
+      prev.map((w) => (w.id === stamped.id ? stamped : w))
+    );
+    setLastSavedLabel(`Salvato in locale (${formatNowTime()})`);
 
     if (!user) {
       try {
         const loggedUser = await loginWithGoogle();
-        await syncAllForUser(loggedUser);
+        await syncAllStateToCloud(loggedUser, stamped);
       } catch (e) {
         if (isUnauthorizedDomainError(e)) {
           setShowDomainModal(true);
           return;
         }
-        console.error(e);
+        setBridgeBanner(
+          'Modifiche salvate nella memoria locale del dispositivo. Connetti il tuo Account Google per sincronizzarle tra dispositivi.'
+        );
+        setTimeout(() => setBridgeBanner(null), 4000);
       }
       return;
     }
 
-    await syncAllForUser(user);
+    await syncAllStateToCloud(user, stamped);
   };
 
   const handleSaveTemplateCloud = async () => {
-    const currentWs =
-      workshops.find((w) => w.id === activeWorkshopId) || workshops[0];
-    const runSave = async (targetUser: User) => {
-      setIsSavingCloud(true);
-      try {
-        await saveTemplateToCloud(
-          {
-            id: `tpl-${currentWs.id}`,
-            title: `Locandina ${currentWs.title}`,
-            presetName: canvasSize.presetId,
-            width: canvasSize.width,
-            height: canvasSize.height,
-            backgroundColor: '#EADDCD',
-            elements: canvasElements,
-          },
-          targetUser
-        );
-        setBridgeBanner('Template vettoriale salvato sul tuo Account Google Firebase!');
-      } catch (e) {
-        console.error(e);
-      } finally {
-        setIsSavingCloud(false);
-        setTimeout(() => setBridgeBanner(null), 3500);
-      }
+    const now = Date.now();
+    const stampedDesign: WorkshopPosterDesign = {
+      ...activeDesign,
+      clientUpdatedAt: now,
     };
+    setDesignsByWorkshopId((prev) => ({
+      ...prev,
+      [activeWorkshop.id]: stampedDesign,
+    }));
+    setLastSavedLabel(`Salvato in locale (${formatNowTime()})`);
 
     if (!user) {
       try {
         const logged = await loginWithGoogle();
-        await runSave(logged);
+        await syncAllStateToCloud(logged);
       } catch (e) {
         if (isUnauthorizedDomainError(e)) {
           setShowDomainModal(true);
           return;
         }
-        console.error(e);
+        setBridgeBanner(
+          'Locandina del Builder salvata nella memoria locale del dispositivo. Accedi con Google per ritrovarla su altri dispositivi.'
+        );
+        setTimeout(() => setBridgeBanner(null), 4000);
       }
     } else {
-      await runSave(user);
+      await syncAllStateToCloud(user);
     }
   };
 
@@ -485,10 +919,8 @@ export default function App() {
     } else {
       try {
         const logged = await loginWithGoogle();
-        await handleSaveWorkshopCloud(
-          workshops.find((w) => w.id === activeWorkshopId) || workshops[0]
-        );
         setUser(logged);
+        await syncAllStateToCloud(logged);
       } catch (e) {
         if (isUnauthorizedDomainError(e)) {
           setShowDomainModal(true);
@@ -657,37 +1089,49 @@ export default function App() {
             onSyncGoogleCalendar={handleSyncGoogleCalendar}
             onSaveWorkshopCloud={handleSaveWorkshopCloud}
             isSavingCloud={isSavingCloud}
+            lastSavedLabel={lastSavedLabel}
           />
         )}
 
         {activeTab === 'graphic-builder' && (
           <GraphicBuilder
-            elements={canvasElements}
+            elements={activeDesign.elements}
             setElements={setCanvasElements}
-            clipboard={clipboardAssets}
+            clipboard={activeDesign.clipboard}
             setClipboard={setClipboardAssets}
-            canvasSize={canvasSize}
+            canvasSize={{
+              width: activeDesign.width,
+              height: activeDesign.height,
+              presetId: activeDesign.presetName,
+            }}
             setCanvasSize={setCanvasSize}
+            backgroundColor={activeDesign.backgroundColor}
+            setBackgroundColor={setCanvasBackgroundColor}
+            workshops={workshops}
+            activeWorkshopId={activeWorkshopId}
+            onSelectWorkshop={setActiveWorkshopId}
+            onResetToWorkshopDefault={handleResetActiveDesignToDefault}
             partners={partners}
-            selectedPartnerId={selectedBuilderPartnerId}
-            onSelectPartner={setSelectedBuilderPartnerId}
+            selectedPartnerId={activeDesign.partnerId || activeWorkshop.partnerId || ''}
+            onSelectPartner={handleSelectBuilderPartner}
             onOpenFontModal={() => setActiveTab('font-engine')}
             onSaveTemplateCloud={handleSaveTemplateCloud}
             isSavingCloud={isSavingCloud}
+            lastSavedLabel={lastSavedLabel}
           />
         )}
 
         {activeTab === 'font-engine' && (
           <FontTextureEngine
             canvasCenter={{
-              x: Math.round(canvasSize.width / 2),
-              y: Math.round(canvasSize.height / 2),
+              x: Math.round(activeDesign.width / 2),
+              y: Math.round(activeDesign.height / 2),
             }}
             onInsertElement={(newEl) => {
               setCanvasElements((prev) => [...prev, newEl]);
               setActiveTab('graphic-builder');
               setBridgeBanner(
-                `Tracciato testuale "${newEl.name}" aggiunto al Canvas con filtro ${newEl.textureType}!`
+                `Tracciato testuale "${newEl.name}" aggiunto e salvato nella locandina di "${activeWorkshop.title}"!`
               );
               setTimeout(() => setBridgeBanner(null), 3500);
             }}

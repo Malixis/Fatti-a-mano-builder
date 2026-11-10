@@ -57,6 +57,12 @@
           "minLength": 0,
           "maxLength": 128
         },
+        "calendarEventUrl": {
+          "type": "string",
+          "description": "URL evento Google Calendar sincronizzato",
+          "minLength": 0,
+          "maxLength": 300
+        },
         "category": {
           "type": "string",
           "description": "Categoria creativa",
@@ -105,6 +111,10 @@
           "type": "array",
           "description": "Lista limitata (max 50) di materiali con confezioni ordinate e pezzi per confezione"
         },
+        "clientUpdatedAt": {
+          "type": "number",
+          "description": "Timestamp client in millisecondi per risoluzione conflitti cross-device"
+        },
         "ownerId": {
           "type": "string",
           "description": "UID Firebase dell'utente proprietario",
@@ -133,6 +143,7 @@
         "eventStartTime",
         "eventDurationMinutes",
         "calendarEventId",
+        "calendarEventUrl",
         "category",
         "ticketPrice",
         "venueFeePerPax",
@@ -143,6 +154,7 @@
         "phase2Execution",
         "phase3Closing",
         "materials",
+        "clientUpdatedAt",
         "ownerId",
         "createdAt",
         "updatedAt"
@@ -209,6 +221,10 @@
           "type": "array",
           "description": "Palette colori esadecimali del partner (max 6)"
         },
+        "clientUpdatedAt": {
+          "type": "number",
+          "description": "Timestamp client in millisecondi per risoluzione conflitti cross-device"
+        },
         "ownerId": {
           "type": "string",
           "description": "UID Firebase dell'utente proprietario",
@@ -238,6 +254,7 @@
         "logoShape",
         "fontStyle",
         "palette",
+        "clientUpdatedAt",
         "ownerId",
         "createdAt",
         "updatedAt"
@@ -260,6 +277,10 @@
           "minLength": 1,
           "maxLength": 20
         },
+        "unitCost": {
+          "type": "number",
+          "description": "Costo unitario in Euro"
+        },
         "packsOrderedTotal": {
           "type": "number",
           "description": "Totale confezioni ordinate storicamente"
@@ -267,6 +288,18 @@
         "piecesPerPack": {
           "type": "number",
           "description": "Pezzi contenuti in ogni confezione"
+        },
+        "totalPiecesOrdered": {
+          "type": "number",
+          "description": "Totale pezzi ordinati storicamente"
+        },
+        "piecesUsedTotal": {
+          "type": "number",
+          "description": "Pezzi usati storicamente"
+        },
+        "piecesAvailable": {
+          "type": "number",
+          "description": "Pezzi disponibili"
         },
         "totalPiecesAvailable": {
           "type": "number",
@@ -285,6 +318,10 @@
           "description": "Ultimo laboratorio che ha movimentato la scorta",
           "minLength": 0,
           "maxLength": 120
+        },
+        "clientUpdatedAt": {
+          "type": "number",
+          "description": "Timestamp client in millisecondi per risoluzione conflitti cross-device"
         },
         "ownerId": {
           "type": "string",
@@ -307,12 +344,17 @@
       "required": [
         "name",
         "costType",
+        "unitCost",
         "packsOrderedTotal",
         "piecesPerPack",
+        "totalPiecesOrdered",
+        "piecesUsedTotal",
+        "piecesAvailable",
         "totalPiecesAvailable",
         "totalPiecesUsed",
         "unitCostPerPack",
         "lastWorkshopTitle",
+        "clientUpdatedAt",
         "ownerId",
         "createdAt",
         "updatedAt"
@@ -320,9 +362,15 @@
     },
     "DesignTemplate": {
       "title": "DesignTemplate",
-      "description": "Progetto vettoriale salvato dal Builder Grafico con livelli e tracciati texturizzati.",
+      "description": "Progetto vettoriale salvato dal Builder Grafico associato a una Scheda Laboratorio con livelli, clipboard e tracciati texturizzati.",
       "type": "object",
       "properties": {
+        "workshopId": {
+          "type": "string",
+          "description": "ID della Scheda Laboratorio associata a questa locandina",
+          "minLength": 1,
+          "maxLength": 128
+        },
         "title": {
           "type": "string",
           "description": "Nome del template o locandina",
@@ -349,9 +397,23 @@
           "minLength": 4,
           "maxLength": 16
         },
+        "partnerId": {
+          "type": "string",
+          "description": "ID del Partner attivo nel Builder per questa locandina",
+          "minLength": 0,
+          "maxLength": 128
+        },
         "elements": {
           "type": "array",
           "description": "Lista limitata (max 80) di elementi vettoriali sul canvas"
+        },
+        "clipboard": {
+          "type": "array",
+          "description": "Lista limitata (max 16) di elementi negli appunti vettoriali della locandina"
+        },
+        "clientUpdatedAt": {
+          "type": "number",
+          "description": "Timestamp client in millisecondi per risoluzione conflitti cross-device"
         },
         "ownerId": {
           "type": "string",
@@ -372,12 +434,16 @@
         }
       },
       "required": [
+        "workshopId",
         "title",
         "presetName",
         "width",
         "height",
         "backgroundColor",
+        "partnerId",
         "elements",
+        "clipboard",
+        "clientUpdatedAt",
         "ownerId",
         "createdAt",
         "updatedAt"
@@ -407,7 +473,7 @@
       "schema": {
         "$ref": "#/entities/DesignTemplate"
       },
-      "description": "Collezione dei progetti grafici e locandine vettoriali salvati dall'utente."
+      "description": "Collezione dei progetti grafici e locandine vettoriali salvati per ciascuna scheda laboratorio."
     }
   }
 }

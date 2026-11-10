@@ -76,6 +76,7 @@ export interface PartnerProfile {
   logoShape: PartnerLogoShape;
   fontStyle: FontStyleId;
   palette: string[]; // 3-4 colori esadecimali del partner
+  clientUpdatedAt?: number;
 }
 
 export interface OperationalPhase {
@@ -123,6 +124,20 @@ export interface VectorElement {
   partnerId?: string;
 }
 
+export interface WorkshopPosterDesign {
+  id: string;
+  workshopId: string;
+  title: string;
+  presetName: CanvasPresetId;
+  width: number;
+  height: number;
+  backgroundColor: BrandColorHex;
+  partnerId: string;
+  elements: VectorElement[];
+  clipboard: VectorElement[];
+  clientUpdatedAt: number;
+}
+
 export interface MaterialItem {
   id: string;
   name: string;
@@ -150,6 +165,7 @@ export interface InventoryItem {
   piecesAvailable: number;
   lastWorkshopTitle: string;
   updatedAt?: string;
+  clientUpdatedAt?: number;
 }
 
 export interface WorkshopCard {
@@ -176,6 +192,7 @@ export interface WorkshopCard {
   phase3Closing: string;
   materials: MaterialItem[];
   updatedAt?: string;
+  clientUpdatedAt?: number;
 }
 
 export interface RoiMetrics {
@@ -208,3 +225,4 @@ export interface GeminiAssistResult {
   pricingAdvice: string;
   source?: string;
 }
+

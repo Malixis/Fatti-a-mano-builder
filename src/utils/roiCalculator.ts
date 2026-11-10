@@ -3,7 +3,9 @@ import {
   MaterialItem,
   PartnerProfile,
   RoiMetrics,
+  VectorElement,
   WorkshopCard,
+  WorkshopPosterDesign,
 } from '../types/erp';
 
 /**
@@ -193,6 +195,7 @@ export function mergeConfirmedMaterialsIntoInventory(
           existing.piecesAvailable + breakdown.remainingPiecesForInventory,
         lastWorkshopTitle: workshopTitle,
         updatedAt: new Date().toISOString().slice(0, 10),
+        clientUpdatedAt: Date.now(),
       });
     } else {
       map.set(key, {
@@ -207,6 +210,7 @@ export function mergeConfirmedMaterialsIntoInventory(
         piecesAvailable: breakdown.remainingPiecesForInventory,
         lastWorkshopTitle: workshopTitle,
         updatedAt: new Date().toISOString().slice(0, 10),
+        clientUpdatedAt: Date.now(),
       });
     }
   }
@@ -265,6 +269,7 @@ export function sanitizeWorkshopForFirestore(workshop: WorkshopCard, ownerId: st
       packed: Boolean(m.packed),
       confirmedForInventory: Boolean(m.confirmedForInventory ?? true),
     })),
+    clientUpdatedAt: Math.max(0, Number(workshop.clientUpdatedAt) || Date.now()),
     ownerId: ownerId.slice(0, 128),
   };
 }
@@ -286,6 +291,7 @@ export function sanitizePartnerForFirestore(partner: PartnerProfile, ownerId: st
     )
       .slice(0, 6)
       .map((c) => String(c || '#1A2B4C').slice(0, 16)),
+    clientUpdatedAt: Math.max(0, Number(partner.clientUpdatedAt) || Date.now()),
     ownerId: ownerId.slice(0, 128),
   };
 }
@@ -304,6 +310,63 @@ export function sanitizeInventoryItemForFirestore(item: InventoryItem, ownerId: 
     totalPiecesUsed: Math.min(1000000, Math.max(0, Number(item.piecesUsedTotal) || 0)),
     unitCostPerPack: Math.min(100000, Math.max(0, Number(item.unitCost) || 0)),
     lastWorkshopTitle: (item.lastWorkshopTitle || 'Magazzino Iniziale').trim().slice(0, 120),
+    clientUpdatedAt: Math.max(0, Number(item.clientUpdatedAt) || Date.now()),
     ownerId: ownerId.slice(0, 128),
   };
 }
+
+function sanitizeVectorElementsList(elements: VectorElement[], maxItems = 80) {
+  return (elements || []).slice(0, maxItems).map((el) => ({
+    id: String(el.id || 'el').slice(0, 80),
+    name: String(el.name || 'Elemento').slice(0, 100),
+    type: el.type || 'freehand',
+    x: Math.round(Number(el.x) || 0),
+    y: Math.round(Number(el.y) || 0),
+    width: Math.round(Number(el.width) || 100),
+    height: Math.round(Number(el.height) || 100),
+    rotation: Math.round(Number(el.rotation) || 0),
+    scale: Number(el.scale || 1),
+    color: String(el.color || '#1A2B4C').slice(0, 16),
+    secondaryColor: String(el.secondaryColor || '#B85B43').slice(0, 16),
+    opacity: Number(el.opacity ?? 1),
+    zIndex: Number(el.zIndex || 1),
+    visible: Boolean(el.visible ?? true),
+    locked: Boolean(el.locked ?? false),
+    pathData: String(el.pathData || '').slice(0, 8000),
+    subPaths: Array.isArray(el.subPaths)
+      ? el.subPaths.slice(0, 12).map((sp) => ({
+          d: String(sp.d || '').slice(0, 4000),
+          fill: String(sp.fill || 'none').slice(0, 24),
+          stroke: String(sp.stroke || 'none').slice(0, 24),
+          strokeWidth: Number(sp.strokeWidth || 2),
+        }))
+      : [],
+    textureType: el.textureType || 'none',
+    textContent: String(el.textContent || '').slice(0, 800),
+    fontStyle: el.fontStyle || 'editorial-serif',
+    fontSize: Number(el.fontSize || 42),
+    stampKind: el.stampKind || 'seal-fatti-a-mano',
+    isHandDrawnText: Boolean(el.isHandDrawnText ?? false),
+    partnerId: String(el.partnerId || '').slice(0, 128),
+  }));
+}
+
+export function sanitizeDesignTemplateForFirestore(
+  design: WorkshopPosterDesign,
+  ownerId: string
+) {
+  return {
+    workshopId: String(design.workshopId || 'ws-1').slice(0, 128),
+    title: (design.title || 'Locandina Fatti a mano').trim().slice(0, 120),
+    presetName: String(design.presetName || '1080x1350').slice(0, 80),
+    width: Math.min(10000, Math.max(100, Number(design.width) || 1080)),
+    height: Math.min(10000, Math.max(100, Number(design.height) || 1350)),
+    backgroundColor: String(design.backgroundColor || '#EADDCD').slice(0, 16),
+    partnerId: String(design.partnerId || '').slice(0, 128),
+    elements: sanitizeVectorElementsList(design.elements, 80),
+    clipboard: sanitizeVectorElementsList(design.clipboard || [], 16),
+    clientUpdatedAt: Math.max(0, Number(design.clientUpdatedAt) || Date.now()),
+    ownerId: ownerId.slice(0, 128),
+  };
+}
+

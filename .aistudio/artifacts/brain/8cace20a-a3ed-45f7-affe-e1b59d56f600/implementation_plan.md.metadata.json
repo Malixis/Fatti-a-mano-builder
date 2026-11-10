@@ -1,6 +1,6 @@
 {
-  "summary":  "Guida passo-passo e piano di aggiornamento per risolvere l'errore Firebase (auth/unauthorized-domain) su GitHub Pages autorizzando il dominio github.io nella Firebase Console e aggiungendo nell'app un assistente automatico con link diretto al progetto Firebase.",
-  "updatedAt":  "2026-11-10T08:27:13.545887048Z",
+  "summary":  "Piano tecnico e architetturale per risolvere il bug di ripristino involontario delle Schede Laboratorio durante il salvataggio Cloud Firestore e garantire la persistenza automatica e multi-dispositivo di ogni locandina nel Builder Grafico (associata alla singola Scheda Laboratorio).",
+  "updatedAt":  "2026-11-10T09:18:24.528563915Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

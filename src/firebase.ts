@@ -19,16 +19,20 @@ import {
   query,
   serverTimestamp,
   setDoc,
+  updateDoc,
   where,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 import {
+  CanvasPresetId,
   InventoryItem,
   PartnerProfile,
   VectorElement,
   WorkshopCard,
+  WorkshopPosterDesign,
 } from './types/erp';
 import {
+  sanitizeDesignTemplateForFirestore,
   sanitizeInventoryItemForFirestore,
   sanitizePartnerForFirestore,
   sanitizeWorkshopForFirestore,
@@ -131,6 +135,68 @@ export function isUnauthorizedDomainError(error: unknown): boolean {
     code === 'auth/unauthorized-domain' ||
     msg.includes('auth/unauthorized-domain')
   );
+}
+
+function isNotFoundFirestoreError(error: unknown): boolean {
+  if (!error) return false;
+  const code = (error as { code?: string })?.code || '';
+  const msg = error instanceof Error ? error.message : String(error);
+  return (
+    code === 'not-found' ||
+    code.endsWith('/not-found') ||
+    msg.includes('No document to update')
+  );
+}
+
+/**
+ * Esegue un salvataggio atomico conforme alle regole di immutabilità di `createdAt` e `ownerId`:
+ * - Se il documento esiste già, esegue `updateDoc` mantenendo intatti `createdAt` e `ownerId`.
+ * - Se il documento non esiste ancora (`not-found`), esegue `setDoc` impostando `createdAt` e `updatedAt` a `serverTimestamp()`.
+ */
+async function upsertCloudDoc(
+  collectionName: string,
+  cleanId: string,
+  sanitizedPayload: Record<string, unknown>,
+  isNewHint = false
+): Promise<void> {
+  const path = `${collectionName}/${cleanId}`;
+  const docRef = doc(db, collectionName, cleanId);
+  const { ownerId, ...mutableFields } = sanitizedPayload;
+
+  if (isNewHint) {
+    try {
+      await setDoc(docRef, {
+        ...sanitizedPayload,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      return;
+    } catch {
+      // Se il documento esisteva già nonostante il flag isNewHint, procedi con updateDoc
+    }
+  }
+
+  try {
+    await updateDoc(docRef, {
+      ...mutableFields,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (updateErr) {
+    if (isNotFoundFirestoreError(updateErr)) {
+      try {
+        await setDoc(docRef, {
+          ...sanitizedPayload,
+          ownerId,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        return;
+      } catch (createErr) {
+        handleFirestoreError(createErr, OperationType.CREATE, path);
+      }
+    }
+    handleFirestoreError(updateErr, OperationType.UPDATE, path);
+  }
 }
 
 function createGoogleProvider() {
@@ -277,17 +343,8 @@ export async function saveWorkshopToCloud(
   isNew: boolean
 ): Promise<void> {
   const cleanId = workshop.id.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
-  const path = `workshops/${cleanId}`;
   const sanitized = sanitizeWorkshopForFirestore(workshop, user.uid);
-  try {
-    await setDoc(doc(db, 'workshops', cleanId), {
-      ...sanitized,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  } catch (error) {
-    handleFirestoreError(error, isNew ? OperationType.CREATE : OperationType.WRITE, path);
-  }
+  await upsertCloudDoc('workshops', cleanId, sanitized, isNew);
 }
 
 export async function deleteWorkshopFromCloud(workshopId: string): Promise<void> {
@@ -337,6 +394,8 @@ export function subscribeUserWorkshops(
                   description: d.phase3Closing || '',
                 },
               ];
+        const serverUpdatedMs =
+          typeof d.updatedAt?.toMillis === 'function' ? d.updatedAt.toMillis() : 0;
         items.push({
           id: docSnap.id,
           title: d.title,
@@ -350,15 +409,16 @@ export function subscribeUserWorkshops(
           calendarEventId: d.calendarEventId || '',
           calendarEventUrl: d.calendarEventUrl || '',
           category: d.category,
-          ticketPrice: d.ticketPrice,
-          venueFeePerPax: d.venueFeePerPax,
-          targetPax: d.targetPax,
+          ticketPrice: Number(d.ticketPrice) || 0,
+          venueFeePerPax: Number(d.venueFeePerPax) || 0,
+          targetPax: Number(d.targetPax) || 20,
           calculatorLinked: d.calculatorLinked ?? true,
           phases,
           phase1Setup: d.phase1Setup || phases[0]?.description || '',
           phase2Execution: d.phase2Execution || phases[1]?.description || '',
           phase3Closing: d.phase3Closing || phases[2]?.description || '',
           materials: Array.isArray(d.materials) ? d.materials : [],
+          clientUpdatedAt: Number(d.clientUpdatedAt) || serverUpdatedMs || 1,
         });
       });
       onUpdate(items);
@@ -374,17 +434,8 @@ export async function savePartnerToCloud(
   user: User
 ): Promise<void> {
   const cleanId = partner.id.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
-  const path = `partners/${cleanId}`;
   const sanitized = sanitizePartnerForFirestore(partner, user.uid);
-  try {
-    await setDoc(doc(db, 'partners', cleanId), {
-      ...sanitized,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
+  await upsertCloudDoc('partners', cleanId, sanitized);
 }
 
 export async function deletePartnerFromCloud(partnerId: string): Promise<void> {
@@ -408,6 +459,8 @@ export function subscribeUserPartners(
       const items: PartnerProfile[] = [];
       snapshot.forEach((docSnap) => {
         const d = docSnap.data();
+        const serverUpdatedMs =
+          typeof d.updatedAt?.toMillis === 'function' ? d.updatedAt.toMillis() : 0;
         items.push({
           id: docSnap.id,
           name: d.name,
@@ -420,6 +473,7 @@ export function subscribeUserPartners(
           logoShape: d.logoShape || 'circle-seal',
           fontStyle: d.fontStyle || 'editorial-serif',
           palette: Array.isArray(d.palette) ? d.palette : ['#1A2B4C', '#B85B43', '#4A6B53'],
+          clientUpdatedAt: Number(d.clientUpdatedAt) || serverUpdatedMs || 1,
         });
       });
       onUpdate(items);
@@ -435,17 +489,8 @@ export async function saveInventoryItemToCloud(
   user: User
 ): Promise<void> {
   const cleanId = item.id.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
-  const path = `inventory/${cleanId}`;
   const sanitized = sanitizeInventoryItemForFirestore(item, user.uid);
-  try {
-    await setDoc(doc(db, 'inventory', cleanId), {
-      ...sanitized,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
+  await upsertCloudDoc('inventory', cleanId, sanitized);
 }
 
 export async function deleteInventoryItemFromCloud(itemId: string): Promise<void> {
@@ -469,18 +514,23 @@ export function subscribeUserInventory(
       const items: InventoryItem[] = [];
       snapshot.forEach((docSnap) => {
         const d = docSnap.data();
+        const serverUpdatedMs =
+          typeof d.updatedAt?.toMillis === 'function' ? d.updatedAt.toMillis() : 0;
         items.push({
           id: docSnap.id,
           name: d.name,
           costType: d.costType === 'fixed' ? 'fixed' : 'variable',
-          unitCost: Number(d.unitCost) || 0,
+          unitCost: Number(d.unitCost ?? d.unitCostPerPack) || 0,
           packsOrderedTotal: Number(d.packsOrderedTotal) || 1,
           piecesPerPack: Number(d.piecesPerPack) || 1,
-          totalPiecesOrdered: Number(d.totalPiecesOrdered) || 1,
-          piecesUsedTotal: Number(d.piecesUsedTotal) || 0,
-          piecesAvailable: Number(d.piecesAvailable) || 0,
+          totalPiecesOrdered:
+            Number(d.totalPiecesOrdered) ||
+            (Number(d.packsOrderedTotal) || 1) * (Number(d.piecesPerPack) || 1),
+          piecesUsedTotal: Number(d.piecesUsedTotal ?? d.totalPiecesUsed) || 0,
+          piecesAvailable: Number(d.piecesAvailable ?? d.totalPiecesAvailable) || 0,
           lastWorkshopTitle: d.lastWorkshopTitle || '',
           updatedAt: d.updatedAtLabel || '',
+          clientUpdatedAt: Number(d.clientUpdatedAt) || serverUpdatedMs || 1,
         });
       });
       onUpdate(items);
@@ -491,55 +541,100 @@ export function subscribeUserInventory(
   );
 }
 
+function parseVectorElementFromCloud(raw: Record<string, unknown>): VectorElement {
+  return {
+    id: String(raw.id || `el-${Date.now()}`),
+    name: String(raw.name || 'Elemento'),
+    type: (raw.type as VectorElement['type']) || 'freehand',
+    x: Number(raw.x) || 0,
+    y: Number(raw.y) || 0,
+    width: Number(raw.width) || 100,
+    height: Number(raw.height) || 100,
+    rotation: Number(raw.rotation) || 0,
+    scale: Number(raw.scale) || 1,
+    color: String(raw.color || '#1A2B4C'),
+    secondaryColor: String(raw.secondaryColor || '#B85B43'),
+    opacity: Number(raw.opacity ?? 1),
+    zIndex: Number(raw.zIndex || 1),
+    visible: Boolean(raw.visible ?? true),
+    locked: Boolean(raw.locked ?? false),
+    pathData: String(raw.pathData || ''),
+    subPaths: Array.isArray(raw.subPaths)
+      ? raw.subPaths.map((sp: Record<string, unknown>) => ({
+          d: String(sp.d || ''),
+          fill: String(sp.fill || 'none'),
+          stroke: String(sp.stroke || 'none'),
+          strokeWidth: Number(sp.strokeWidth || 2),
+        }))
+      : undefined,
+    textureType: (raw.textureType as VectorElement['textureType']) || 'none',
+    textContent: String(raw.textContent || ''),
+    fontStyle: (raw.fontStyle as VectorElement['fontStyle']) || 'editorial-serif',
+    fontSize: Number(raw.fontSize || 42),
+    stampKind: (raw.stampKind as VectorElement['stampKind']) || 'seal-fatti-a-mano',
+    isHandDrawnText: Boolean(raw.isHandDrawnText ?? false),
+    partnerId: String(raw.partnerId || ''),
+  };
+}
+
 export async function saveTemplateToCloud(
-  template: {
-    id: string;
-    title: string;
-    presetName: string;
-    width: number;
-    height: number;
-    backgroundColor: string;
-    elements: VectorElement[];
-  },
+  design: WorkshopPosterDesign,
   user: User
 ): Promise<void> {
-  const cleanId = template.id.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
+  const cleanId = design.id.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
+  const sanitized = sanitizeDesignTemplateForFirestore(design, user.uid);
+  await upsertCloudDoc('templates', cleanId, sanitized);
+}
+
+export async function deleteTemplateFromCloud(templateId: string): Promise<void> {
+  const cleanId = templateId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
   const path = `templates/${cleanId}`;
   try {
-    await setDoc(doc(db, 'templates', cleanId), {
-      title: (template.title || 'Locandina Fatti a mano').slice(0, 120),
-      presetName: (template.presetName || '1080x1350').slice(0, 80),
-      width: Math.min(10000, Math.max(100, Number(template.width) || 1080)),
-      height: Math.min(10000, Math.max(100, Number(template.height) || 1350)),
-      backgroundColor: (template.backgroundColor || '#EADDCD').slice(0, 16),
-      elements: (template.elements || []).slice(0, 80).map((el) => ({
-        id: String(el.id).slice(0, 64),
-        name: String(el.name || 'Elemento').slice(0, 80),
-        type: el.type,
-        x: Math.round(el.x),
-        y: Math.round(el.y),
-        width: Math.round(el.width),
-        height: Math.round(el.height),
-        rotation: Math.round(el.rotation || 0),
-        scale: Number(el.scale || 1),
-        color: el.color,
-        secondaryColor: el.secondaryColor || '#B85B43',
-        opacity: Number(el.opacity ?? 1),
-        zIndex: Number(el.zIndex || 1),
-        visible: Boolean(el.visible),
-        locked: Boolean(el.locked),
-        pathData: String(el.pathData || '').slice(0, 4500),
-        textureType: el.textureType || 'none',
-        textContent: String(el.textContent || '').slice(0, 500),
-        fontStyle: el.fontStyle || 'editorial-serif',
-        fontSize: Number(el.fontSize || 42),
-        stampKind: el.stampKind || 'seal-fatti-a-mano',
-      })),
-      ownerId: user.uid,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
+    await deleteDoc(doc(db, 'templates', cleanId));
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    handleFirestoreError(error, OperationType.DELETE, path);
   }
+}
+
+export function subscribeUserTemplates(
+  userId: string,
+  onUpdate: (designs: WorkshopPosterDesign[]) => void
+) {
+  const q = query(collection(db, 'templates'), where('ownerId', '==', userId));
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const items: WorkshopPosterDesign[] = [];
+      snapshot.forEach((docSnap) => {
+        const d = docSnap.data();
+        const serverUpdatedMs =
+          typeof d.updatedAt?.toMillis === 'function' ? d.updatedAt.toMillis() : 0;
+        const inferredWorkshopId =
+          typeof d.workshopId === 'string' && d.workshopId
+            ? d.workshopId
+            : docSnap.id.replace(/^tpl-/, '');
+        items.push({
+          id: docSnap.id,
+          workshopId: inferredWorkshopId,
+          title: String(d.title || 'Locandina Fatti a mano'),
+          presetName: (d.presetName as CanvasPresetId) || '1080x1350',
+          width: Number(d.width) || 1080,
+          height: Number(d.height) || 1350,
+          backgroundColor: String(d.backgroundColor || '#EADDCD'),
+          partnerId: String(d.partnerId || ''),
+          elements: Array.isArray(d.elements)
+            ? d.elements.map((el: Record<string, unknown>) => parseVectorElementFromCloud(el))
+            : [],
+          clipboard: Array.isArray(d.clipboard)
+            ? d.clipboard.map((el: Record<string, unknown>) => parseVectorElementFromCloud(el))
+            : [],
+          clientUpdatedAt: Number(d.clientUpdatedAt) || serverUpdatedMs || 1,
+        });
+      });
+      onUpdate(items);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'templates');
+    }
+  );
 }

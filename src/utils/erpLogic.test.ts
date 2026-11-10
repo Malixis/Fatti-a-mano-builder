@@ -4,6 +4,7 @@ import {
   calculateWorkshopRoi,
   computeMaterialRowBreakdown,
   mergeConfirmedMaterialsIntoInventory,
+  sanitizeDesignTemplateForFirestore,
   sanitizeWorkshopForFirestore,
 } from './roiCalculator';
 import {
@@ -11,9 +12,11 @@ import {
   buildPosterFromWorkshop,
   chaikinSmooth,
   computeSamplePressure,
+  createDefaultWorkshopDesign,
   generateOrganicBlobPath,
   generateSmoothedBrushPath,
   generateWavyCheckerboardPath,
+  syncPosterElementsWithWorkshop,
 } from './vectorMath';
 import { InventoryItem, MaterialItem, PartnerProfile, WorkshopCard } from '../types/erp';
 
@@ -177,4 +180,51 @@ test('buildPosterFromWorkshop binds Workshop data into 1080x1350 poster layers a
   const check = generateWavyCheckerboardPath(0, 0, 200, 200, 4, 4, 10, 1);
   assert.ok(blob.includes('C'));
   assert.ok(check.includes('M'));
+
+  // Verify createDefaultWorkshopDesign and non-destructive syncPosterElementsWithWorkshop
+  const initialDesign = createDefaultWorkshopDesign(sampleWorkshop);
+  initialDesign.elements.push({
+    id: 'stroke-custom-apple-pencil',
+    name: 'Pennellata Apple Pencil Custom',
+    type: 'freehand',
+    x: 400,
+    y: 400,
+    width: 120,
+    height: 80,
+    rotation: 0,
+    scale: 1,
+    color: '#4A6B53',
+    opacity: 0.95,
+    zIndex: 99,
+    visible: true,
+    locked: false,
+    pathData: 'M 10 10 Q 50 50 90 90 Z',
+    textureType: 'rough-brush',
+  });
+
+  const updatedWorkshop: WorkshopCard = {
+    ...sampleWorkshop,
+    title: 'Rilega il tuo diario — Edizione Inverno',
+    ticketPrice: 35,
+  };
+
+  const syncedDesign = syncPosterElementsWithWorkshop(initialDesign, updatedWorkshop);
+  assert.ok(
+    syncedDesign.elements.some((el) => el.id === 'stroke-custom-apple-pencil'),
+    'Custom Apple Pencil stroke in Builder must be preserved when workshop is updated'
+  );
+  assert.ok(
+    syncedDesign.elements.some((el) => el.textContent?.includes('Edizione Inverno')),
+    'Updated workshop title must be reflected in the poster design'
+  );
+  assert.ok(
+    syncedDesign.elements.some((el) => el.textContent?.includes('35€')),
+    'Updated workshop price must be reflected in the poster design'
+  );
+
+  const sanitizedTemplate = sanitizeDesignTemplateForFirestore(syncedDesign, 'user_123');
+  assert.equal(sanitizedTemplate.workshopId, 'w-test');
+  assert.equal(sanitizedTemplate.ownerId, 'user_123');
+  assert.ok(sanitizedTemplate.clientUpdatedAt > 0);
 });
+

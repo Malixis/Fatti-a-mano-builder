@@ -63,6 +63,7 @@ interface LabManagerProps {
   ) => Promise<{ eventId: string; htmlLink: string }>;
   onSaveWorkshopCloud?: (workshop: WorkshopCard) => void;
   isSavingCloud?: boolean;
+  lastSavedLabel?: string;
 }
 
 export const LabManager: React.FC<LabManagerProps> = ({
@@ -82,6 +83,7 @@ export const LabManager: React.FC<LabManagerProps> = ({
   onSyncGoogleCalendar,
   onSaveWorkshopCloud,
   isSavingCloud,
+  lastSavedLabel,
 }) => {
   const activeWorkshop = useMemo(
     () => workshops.find((w) => w.id === activeWorkshopId) || workshops[0],
@@ -535,9 +537,19 @@ export const LabManager: React.FC<LabManagerProps> = ({
 
         {/* Azioni Principali: Salva Cloud, Esporta Packing List PDF, Genera Locandina (Ponte) */}
         <div className="flex flex-wrap items-center gap-2">
+          {lastSavedLabel && (
+            <span
+              data-testid="lab-autosave-status"
+              className="text-[11px] font-medium text-[#4A6B53] whitespace-nowrap mr-1"
+            >
+              {lastSavedLabel}
+            </span>
+          )}
+
           {onSaveWorkshopCloud && (
             <button
               type="button"
+              data-testid="save-workshop-cloud-btn"
               onClick={() => onSaveWorkshopCloud(activeWorkshop)}
               disabled={isSavingCloud}
               className="flex items-center gap-1.5 px-3.5 py-2 bg-[#EADDCD] border border-[#1A2B4C]/25 text-[#1A2B4C] text-xs font-semibold rounded-lg hover:bg-[#1A2B4C]/10 transition-colors whitespace-nowrap"

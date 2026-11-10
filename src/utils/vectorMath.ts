@@ -6,6 +6,7 @@ import {
   TextureFilterType,
   VectorElement,
   WorkshopCard,
+  WorkshopPosterDesign,
 } from '../types/erp';
 
 /**
@@ -890,3 +891,153 @@ export function buildPosterFromWorkshop(
 
   return { canvasElements, clipboardAssets };
 }
+
+/**
+ * Crea il progetto grafico predefinito per una Scheda Laboratorio (con clientUpdatedAt = 0 finché non viene modificato).
+ */
+export function createDefaultWorkshopDesign(
+  workshop: WorkshopCard,
+  partner?: PartnerProfile,
+  clientUpdatedAt = 0
+): WorkshopPosterDesign {
+  const { canvasElements, clipboardAssets } = buildPosterFromWorkshop(workshop, partner);
+  return {
+    id: `tpl-${workshop.id}`,
+    workshopId: workshop.id,
+    title: `Locandina ${workshop.title}`,
+    presetName: '1080x1350',
+    width: 1080,
+    height: 1350,
+    backgroundColor: '#EADDCD',
+    partnerId: partner?.id || workshop.partnerId || '',
+    elements: canvasElements,
+    clipboard: clipboardAssets,
+    clientUpdatedAt,
+  };
+}
+
+/**
+ * Aggiorna i testi collegati (Titolo, Sottotitolo, Prezzo, Location/Data, Categoria e Badge Partner)
+ * all'interno di un progetto del Builder Grafico esistente SENZA cancellare i disegni a mano libera,
+ * i timbri aggiunti, i colori o le posizioni personalizzate dall'utente.
+ */
+export function syncPosterElementsWithWorkshop(
+  existingDesign: WorkshopPosterDesign,
+  workshop: WorkshopCard,
+  partner?: PartnerProfile
+): WorkshopPosterDesign {
+  const wrappedTitle = wrapPosterText(workshop.title, 22);
+  const wrappedSubtitle = wrapPosterText(workshop.subtitle, 36);
+  const priceText = `${workshop.ticketPrice}€`;
+  const badgeText = `Quota ${priceText} · Materiali + Aperitivo`;
+  const infoText = `${workshop.dateLabel}\n📍 ${workshop.location}`;
+  const kickerText = `LABORATORIO CREATIVO · ${workshop.category.toUpperCase()}`;
+
+  const updatedElements = existingDesign.elements.map((el) => {
+    if (el.id.startsWith('bridge-title-')) {
+      const meta = generateTextVectorBackdropPath(
+        wrappedTitle,
+        el.x,
+        el.y,
+        el.fontSize || 72,
+        el.textureType
+      );
+      return {
+        ...el,
+        name: `Titolo: ${workshop.title}`,
+        textContent: wrappedTitle,
+        width: meta.width,
+        height: meta.height,
+        pathData: meta.pathData,
+      };
+    }
+    if (el.id.startsWith('bridge-sub-')) {
+      return {
+        ...el,
+        textContent: wrappedSubtitle,
+      };
+    }
+    if (el.id.startsWith('bridge-price-')) {
+      const meta = generateTextVectorBackdropPath(
+        badgeText,
+        el.x,
+        el.y,
+        el.fontSize || 36,
+        el.textureType
+      );
+      return {
+        ...el,
+        name: `Badge Prezzo (${priceText})`,
+        textContent: badgeText,
+        width: meta.width,
+        height: meta.height,
+        pathData: meta.pathData,
+      };
+    }
+    if (el.id.startsWith('bridge-location-')) {
+      const meta = generateTextVectorBackdropPath(
+        infoText,
+        el.x,
+        el.y,
+        el.fontSize || 30,
+        el.textureType
+      );
+      return {
+        ...el,
+        name: `Location: ${workshop.location}`,
+        textContent: infoText,
+        width: meta.width,
+        height: meta.height,
+        pathData: meta.pathData,
+      };
+    }
+    if (el.id.startsWith('bridge-kicker-')) {
+      return {
+        ...el,
+        textContent: kickerText,
+      };
+    }
+    return el;
+  });
+
+  let nextClipboard = [...existingDesign.clipboard];
+  let finalElements = updatedElements;
+
+  if (partner) {
+    const { partnerElements, partnerClipboard } = buildPartnerVectorAssets(
+      partner,
+      existingDesign.width,
+      existingDesign.height
+    );
+    const hasPartnerBadge = finalElements.some((el) => el.id.startsWith('partner-badge-'));
+    if (hasPartnerBadge) {
+      finalElements = finalElements.map((el) =>
+        el.id.startsWith('partner-badge-')
+          ? {
+              ...partnerElements[0],
+              x: el.x,
+              y: el.y,
+              rotation: el.rotation,
+              zIndex: el.zIndex,
+            }
+          : el
+      );
+    } else {
+      finalElements = [...finalElements, partnerElements[0]];
+    }
+    const withoutOldPartnerClips = nextClipboard.filter(
+      (el) => !el.id.startsWith('clip-partner-')
+    );
+    nextClipboard = [...partnerClipboard, ...withoutOldPartnerClips].slice(0, 8);
+  }
+
+  return {
+    ...existingDesign,
+    title: `Locandina ${workshop.title}`,
+    partnerId: partner?.id || workshop.partnerId || existingDesign.partnerId || '',
+    elements: finalElements,
+    clipboard: nextClipboard,
+    clientUpdatedAt: Date.now(),
+  };
+}
+

@@ -26,17 +26,17 @@ service cloud.firestore {
     function isValidWorkshop(data) {
       return data.keys().hasAll([
         'title', 'subtitle', 'location', 'partnerId', 'dateLabel',
-        'eventDate', 'eventStartTime', 'eventDurationMinutes', 'calendarEventId',
+        'eventDate', 'eventStartTime', 'eventDurationMinutes', 'calendarEventId', 'calendarEventUrl',
         'category', 'ticketPrice', 'venueFeePerPax', 'targetPax', 'calculatorLinked',
         'phases', 'phase1Setup', 'phase2Execution', 'phase3Closing',
-        'materials', 'ownerId', 'createdAt', 'updatedAt'
+        'materials', 'clientUpdatedAt', 'ownerId', 'createdAt', 'updatedAt'
       ]) &&
       data.keys().hasOnly([
         'title', 'subtitle', 'location', 'partnerId', 'dateLabel',
-        'eventDate', 'eventStartTime', 'eventDurationMinutes', 'calendarEventId',
+        'eventDate', 'eventStartTime', 'eventDurationMinutes', 'calendarEventId', 'calendarEventUrl',
         'category', 'ticketPrice', 'venueFeePerPax', 'targetPax', 'calculatorLinked',
         'phases', 'phase1Setup', 'phase2Execution', 'phase3Closing',
-        'materials', 'ownerId', 'createdAt', 'updatedAt'
+        'materials', 'clientUpdatedAt', 'ownerId', 'createdAt', 'updatedAt'
       ]) &&
       data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
       data.subtitle is string && data.subtitle.size() <= 200 &&
@@ -47,6 +47,7 @@ service cloud.firestore {
       data.eventStartTime is string && data.eventStartTime.size() <= 12 &&
       data.eventDurationMinutes is number && data.eventDurationMinutes >= 15 && data.eventDurationMinutes <= 1440 &&
       data.calendarEventId is string && data.calendarEventId.size() <= 128 &&
+      data.calendarEventUrl is string && data.calendarEventUrl.size() <= 300 &&
       data.category is string && data.category.size() >= 1 && data.category.size() <= 60 &&
       data.ticketPrice is number && data.ticketPrice >= 0 && data.ticketPrice <= 10000 &&
       data.venueFeePerPax is number && data.venueFeePerPax >= 0 && data.venueFeePerPax <= 10000 &&
@@ -59,6 +60,7 @@ service cloud.firestore {
       data.phase3Closing is string && data.phase3Closing.size() <= 3000 &&
       data.materials is list && data.materials.size() <= 50 &&
       (data.materials.size() == 0 || data.materials[0] is map) &&
+      data.clientUpdatedAt is number && data.clientUpdatedAt >= 0 &&
       data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
       data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
       data.ownerId == request.auth.uid &&
@@ -70,12 +72,12 @@ service cloud.firestore {
       return data.keys().hasAll([
         'name', 'whoTheyAre', 'address', 'commercialDealType',
         'commercialDealNotes', 'defaultVenueFee', 'logoText',
-        'logoShape', 'fontStyle', 'palette', 'ownerId', 'createdAt', 'updatedAt'
+        'logoShape', 'fontStyle', 'palette', 'clientUpdatedAt', 'ownerId', 'createdAt', 'updatedAt'
       ]) &&
       data.keys().hasOnly([
         'name', 'whoTheyAre', 'address', 'commercialDealType',
         'commercialDealNotes', 'defaultVenueFee', 'logoText',
-        'logoShape', 'fontStyle', 'palette', 'ownerId', 'createdAt', 'updatedAt'
+        'logoShape', 'fontStyle', 'palette', 'clientUpdatedAt', 'ownerId', 'createdAt', 'updatedAt'
       ]) &&
       data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
       data.whoTheyAre is string && data.whoTheyAre.size() <= 1000 &&
@@ -88,6 +90,7 @@ service cloud.firestore {
       data.fontStyle is string && data.fontStyle.size() >= 1 && data.fontStyle.size() <= 40 &&
       data.palette is list && data.palette.size() >= 1 && data.palette.size() <= 6 &&
       data.palette[0] is string && data.palette[0].size() <= 16 &&
+      data.clientUpdatedAt is number && data.clientUpdatedAt >= 0 &&
       data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
       data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
       data.ownerId == request.auth.uid &&
@@ -97,23 +100,30 @@ service cloud.firestore {
 
     function isValidInventoryItem(data) {
       return data.keys().hasAll([
-        'name', 'costType', 'packsOrderedTotal', 'piecesPerPack',
+        'name', 'costType', 'unitCost', 'packsOrderedTotal', 'piecesPerPack',
+        'totalPiecesOrdered', 'piecesUsedTotal', 'piecesAvailable',
         'totalPiecesAvailable', 'totalPiecesUsed', 'unitCostPerPack',
-        'lastWorkshopTitle', 'ownerId', 'createdAt', 'updatedAt'
+        'lastWorkshopTitle', 'clientUpdatedAt', 'ownerId', 'createdAt', 'updatedAt'
       ]) &&
       data.keys().hasOnly([
-        'name', 'costType', 'packsOrderedTotal', 'piecesPerPack',
+        'name', 'costType', 'unitCost', 'packsOrderedTotal', 'piecesPerPack',
+        'totalPiecesOrdered', 'piecesUsedTotal', 'piecesAvailable',
         'totalPiecesAvailable', 'totalPiecesUsed', 'unitCostPerPack',
-        'lastWorkshopTitle', 'ownerId', 'createdAt', 'updatedAt'
+        'lastWorkshopTitle', 'clientUpdatedAt', 'ownerId', 'createdAt', 'updatedAt'
       ]) &&
       data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
       data.costType is string && data.costType.size() >= 1 && data.costType.size() <= 20 &&
+      data.unitCost is number && data.unitCost >= 0 && data.unitCost <= 100000 &&
       data.packsOrderedTotal is number && data.packsOrderedTotal >= 0 && data.packsOrderedTotal <= 100000 &&
       data.piecesPerPack is number && data.piecesPerPack >= 1 && data.piecesPerPack <= 100000 &&
+      data.totalPiecesOrdered is number && data.totalPiecesOrdered >= 0 && data.totalPiecesOrdered <= 1000000 &&
+      data.piecesUsedTotal is number && data.piecesUsedTotal >= 0 && data.piecesUsedTotal <= 1000000 &&
+      data.piecesAvailable is number && data.piecesAvailable >= 0 && data.piecesAvailable <= 1000000 &&
       data.totalPiecesAvailable is number && data.totalPiecesAvailable >= 0 && data.totalPiecesAvailable <= 1000000 &&
       data.totalPiecesUsed is number && data.totalPiecesUsed >= 0 && data.totalPiecesUsed <= 1000000 &&
       data.unitCostPerPack is number && data.unitCostPerPack >= 0 && data.unitCostPerPack <= 100000 &&
       data.lastWorkshopTitle is string && data.lastWorkshopTitle.size() <= 120 &&
+      data.clientUpdatedAt is number && data.clientUpdatedAt >= 0 &&
       data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
       data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
       data.ownerId == request.auth.uid &&
@@ -123,20 +133,25 @@ service cloud.firestore {
 
     function isValidDesignTemplate(data) {
       return data.keys().hasAll([
-        'title', 'presetName', 'width', 'height',
-        'backgroundColor', 'elements', 'ownerId', 'createdAt', 'updatedAt'
+        'workshopId', 'title', 'presetName', 'width', 'height',
+        'backgroundColor', 'partnerId', 'elements', 'clipboard', 'clientUpdatedAt', 'ownerId', 'createdAt', 'updatedAt'
       ]) &&
       data.keys().hasOnly([
-        'title', 'presetName', 'width', 'height',
-        'backgroundColor', 'elements', 'ownerId', 'createdAt', 'updatedAt'
+        'workshopId', 'title', 'presetName', 'width', 'height',
+        'backgroundColor', 'partnerId', 'elements', 'clipboard', 'clientUpdatedAt', 'ownerId', 'createdAt', 'updatedAt'
       ]) &&
+      data.workshopId is string && data.workshopId.size() >= 1 && data.workshopId.size() <= 128 &&
       data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
       data.presetName is string && data.presetName.size() >= 1 && data.presetName.size() <= 80 &&
       data.width is number && data.width >= 100 && data.width <= 10000 &&
       data.height is number && data.height >= 100 && data.height <= 10000 &&
       data.backgroundColor is string && data.backgroundColor.size() >= 4 && data.backgroundColor.size() <= 16 &&
+      data.partnerId is string && data.partnerId.size() <= 128 &&
       data.elements is list && data.elements.size() <= 80 &&
       (data.elements.size() == 0 || data.elements[0] is map) &&
+      data.clipboard is list && data.clipboard.size() <= 16 &&
+      (data.clipboard.size() == 0 || data.clipboard[0] is map) &&
+      data.clientUpdatedAt is number && data.clientUpdatedAt >= 0 &&
       data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
       data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
       data.ownerId == request.auth.uid &&
@@ -156,10 +171,10 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         incoming().diff(existing()).affectedKeys().hasOnly([
           'title', 'subtitle', 'location', 'partnerId', 'dateLabel',
-          'eventDate', 'eventStartTime', 'eventDurationMinutes', 'calendarEventId',
+          'eventDate', 'eventStartTime', 'eventDurationMinutes', 'calendarEventId', 'calendarEventUrl',
           'category', 'ticketPrice', 'venueFeePerPax', 'targetPax', 'calculatorLinked',
           'phases', 'phase1Setup', 'phase2Execution', 'phase3Closing',
-          'materials', 'updatedAt'
+          'materials', 'clientUpdatedAt', 'updatedAt'
         ]);
       allow delete: if isSignedIn() && isValidId(workshopId) && existing().ownerId == request.auth.uid;
     }
@@ -177,7 +192,7 @@ service cloud.firestore {
         incoming().diff(existing()).affectedKeys().hasOnly([
           'name', 'whoTheyAre', 'address', 'commercialDealType',
           'commercialDealNotes', 'defaultVenueFee', 'logoText',
-          'logoShape', 'fontStyle', 'palette', 'updatedAt'
+          'logoShape', 'fontStyle', 'palette', 'clientUpdatedAt', 'updatedAt'
         ]);
       allow delete: if isSignedIn() && isValidId(partnerId) && existing().ownerId == request.auth.uid;
     }
@@ -193,9 +208,10 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
         incoming().diff(existing()).affectedKeys().hasOnly([
-          'name', 'costType', 'packsOrderedTotal', 'piecesPerPack',
+          'name', 'costType', 'unitCost', 'packsOrderedTotal', 'piecesPerPack',
+          'totalPiecesOrdered', 'piecesUsedTotal', 'piecesAvailable',
           'totalPiecesAvailable', 'totalPiecesUsed', 'unitCostPerPack',
-          'lastWorkshopTitle', 'updatedAt'
+          'lastWorkshopTitle', 'clientUpdatedAt', 'updatedAt'
         ]);
       allow delete: if isSignedIn() && isValidId(itemId) && existing().ownerId == request.auth.uid;
     }
@@ -211,8 +227,8 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
         incoming().diff(existing()).affectedKeys().hasOnly([
-          'title', 'presetName', 'width', 'height',
-          'backgroundColor', 'elements', 'updatedAt'
+          'workshopId', 'title', 'presetName', 'width', 'height',
+          'backgroundColor', 'partnerId', 'elements', 'clipboard', 'clientUpdatedAt', 'updatedAt'
         ]);
       allow delete: if isSignedIn() && isValidId(templateId) && existing().ownerId == request.auth.uid;
     }
