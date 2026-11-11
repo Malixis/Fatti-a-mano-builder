@@ -1,4 +1,4 @@
-import { InventoryItem, PartnerProfile, VectorElement, WorkshopCard } from '../types/erp';
+import { ExpenseVoucher, InventoryItem, PartnerProfile, VectorElement, WorkshopCard } from '../types/erp';
 import { buildPosterFromWorkshop } from '../utils/vectorMath';
 
 export const INITIAL_PARTNERS: PartnerProfile[] = [
@@ -16,6 +16,9 @@ export const INITIAL_PARTNERS: PartnerProfile[] = [
     logoShape: 'circle-seal',
     fontStyle: 'editorial-serif',
     palette: ['#7C2D12', '#C26D4A', '#365314'],
+    bureaucracyMode: 'association-receipt',
+    fiscalNotes:
+      "L'Associazione incassa i 20€/pax dai partecipanti con ricevuta associativa e salda a fine serata 6,50€/pax all'Osteria dietro scontrino fiscale cumulativo F&B.",
   },
   {
     id: 'partner-spazio-serra',
@@ -31,6 +34,9 @@ export const INITIAL_PARTNERS: PartnerProfile[] = [
     logoShape: 'botanical-crest',
     fontStyle: 'craft-rounded',
     palette: ['#2D5A3C', '#D97742', '#1E3A5F'],
+    bureaucracyMode: 'partner-cashdesk-rebill',
+    fiscalNotes:
+      "Spazio Serra incassa il biglietto alla propria cassa e versa la quota laboratorio all'Associazione dietro Nota di Debito / Quietanza istituzionale fuori campo IVA.",
   },
   {
     id: 'partner-lab-urbano-nolo',
@@ -46,8 +52,63 @@ export const INITIAL_PARTNERS: PartnerProfile[] = [
     logoShape: 'arch-badge',
     fontStyle: 'mono-label',
     palette: ['#1A2B4C', '#3B6E8C', '#D4A373'],
+    bureaucracyMode: 'split-checkout',
+    fiscalNotes:
+      "Doppio pagamento separato: 18€/pax bonifico/POS diretto all'Associazione per il laboratorio + 7€/pax pagati direttamente al bar di Nolo Lab per il Gin Tonic.",
   },
 ];
+
+export const INITIAL_VOUCHERS: ExpenseVoucher[] = [
+  {
+    id: 'vch-amz-cavalletti-tele',
+    voucherDate: '2026-11-08',
+    invoiceNumber: 'IT-2026-AMZ-48192',
+    category: 'amazon-invoice',
+    description: 'Fattura Amazon: 20 Cavalletti da tavolo in faggio + 3 confezioni Tele 30x40cm 100% cotone',
+    amount: 153.0,
+    paidBy: 'personal-advance',
+    reimbursementStatus: 'reimbursed',
+    workshopId: 'ws-paint-wine',
+    partnerId: 'partner-osteria-cortile',
+    kilometers: 0,
+    kmRate: 0,
+    notes: 'Amazon EU S.à r.l. · Anticipo Mattias',
+    clientUpdatedAt: 1,
+  },
+  {
+    id: 'vch-amz-pennelli-colori',
+    voucherDate: '2026-11-10',
+    invoiceNumber: 'IT-2026-AMZ-51904',
+    category: 'amazon-invoice',
+    description: 'Fattura Amazon: Set 40 pennelli + 20 grembiuli cotone + Set Acrilici Opachi e Shopper Kraft',
+    amount: 101.0,
+    paidBy: 'personal-advance',
+    reimbursementStatus: 'pending',
+    workshopId: 'ws-paint-wine',
+    partnerId: 'partner-osteria-cortile',
+    kilometers: 0,
+    kmRate: 0,
+    notes: 'Amazon EU S.à r.l. · Da rimborsare tramite Nota Spese Associativa',
+    clientUpdatedAt: 1,
+  },
+  {
+    id: 'vch-km-trasferta-tortona',
+    voucherDate: '2026-11-19',
+    invoiceNumber: 'NOTA-KM-01',
+    category: 'mileage-reimbursement',
+    description: 'Trasporto casse cavalletti e tele A/R Magazzino → Osteria del Cortile (Via Tortona 18) · 48 km × 0,45€/km',
+    amount: 21.6,
+    paidBy: 'personal-advance',
+    reimbursementStatus: 'pending',
+    workshopId: 'ws-paint-wine',
+    partnerId: 'partner-osteria-cortile',
+    kilometers: 48,
+    kmRate: 0.45,
+    notes: 'Rimborso Chilometrico ACI (Auto Propria)',
+    clientUpdatedAt: 1,
+  },
+];
+
 
 export const INITIAL_INVENTORY: InventoryItem[] = [
   {

@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import {
+  ExtractedInvoiceLineItem,
   FontStyleId,
   GeminiAssistResult,
   InventoryItem,
@@ -15,8 +16,13 @@ import {
   computeMaterialRowBreakdown,
 } from '../utils/roiCalculator';
 import { compressImageFileToDataUrl } from '../utils/vectorMath';
-import { exportPackingListPdf } from '../utils/pdfExporter';
 import {
+  buildPartnerSummaryText,
+  exportPackingListPdf,
+  exportPartnerSummaryPdf,
+} from '../utils/pdfExporter';
+import {
+  requestAmazonInvoiceExtraction,
   requestPhaseTextImprovement,
   requestWorkshopAiAssist,
 } from '../utils/aiClient';
@@ -32,13 +38,16 @@ import {
   Copy,
   ExternalLink,
   FileDown,
+  FileText,
   ImagePlus,
   Link2,
   Link2Off,
   PackageCheck,
   Palette,
   Plus,
+  Receipt,
   Save,
+  Send,
   Sparkles,
   Trash2,
   Upload,
@@ -59,6 +68,15 @@ interface LabManagerProps {
   onDeletePartner: (partnerId: string) => void;
   inventory: InventoryItem[];
   onConfirmWorkshopInventory: (workshop: WorkshopCard) => void;
+  onUpdateInventoryItem?: (updated: InventoryItem) => void;
+  onImportAmazonInvoice?: (payload: {
+    supplier: string;
+    invoiceNumber: string;
+    invoiceDate: string;
+    items: ExtractedInvoiceLineItem[];
+    workshopTitle: string;
+    workshopId: string;
+  }) => void;
   onDeleteInventoryItem: (itemId: string) => void;
   onSyncGoogleCalendar: (
     workshop: WorkshopCard,
@@ -82,6 +100,8 @@ export const LabManager: React.FC<LabManagerProps> = ({
   onDeletePartner,
   inventory,
   onConfirmWorkshopInventory,
+  onUpdateInventoryItem,
+  onImportAmazonInvoice,
   onDeleteInventoryItem,
   onSyncGoogleCalendar,
   onSaveWorkshopCloud,
@@ -122,8 +142,28 @@ export const LabManager: React.FC<LabManagerProps> = ({
   const [calendarFeedback, setCalendarFeedback] = useState<string | null>(null);
   const [calendarError, setCalendarError] = useState<string | null>(null);
 
-  // Stato Miglioramento Fase con IA
+  // Stato Modale Scheda Riassuntiva Partner (senza margini interni)
+  const [showPartnerSheetModal, setShowPartnerSheetModal] = useState<boolean>(false);
+  const [copiedPartnerSummary, setCopiedPartnerSummary] = useState<boolean>(false);
+
+  // Stato Miglioramento Fase con IA (Box Piccolo Inline sotto la casella di testo)
   const [improvingPhaseId, setImprovingPhaseId] = useState<string | null>(null);
+  const [openAiPromptPhaseId, setOpenAiPromptPhaseId] = useState<string | null>(null);
+  const [phaseAiInstructionMap, setPhaseAiInstructionMap] = useState<
+    Record<string, string>
+  >({});
+
+  // Stato Caricamento Fattura Amazon (PDF / PNG / JPEG) & Anteprima Editabile Pre-Conferma
+  const [isParsingInvoice, setIsParsingInvoice] = useState<boolean>(false);
+  const [invoiceParseError, setInvoiceParseError] = useState<string | null>(null);
+  const [invoiceDraftMeta, setInvoiceDraftMeta] = useState<{
+    supplier: string;
+    invoiceNumber: string;
+    invoiceDate: string;
+  } | null>(null);
+  const [invoiceDraftItems, setInvoiceDraftItems] = useState<
+    ExtractedInvoiceLineItem[]
+  >([]);
 
   // Stato Form Nuovo Materiale
   const [newMatName, setNewMatName] = useState<string>('');
@@ -392,7 +432,15 @@ export const LabManager: React.FC<LabManagerProps> = ({
     updatePhases(copy);
   };
 
-  const handleImprovePhaseWithAi = async (phase: OperationalPhase) => {
+  const handleImprovePhaseWithAi = async (
+    phase: OperationalPhase,
+    explicitInstruction?: string
+  ) => {
+    const customInstruction = (
+      explicitInstruction ??
+      phaseAiInstructionMap[phase.id] ??
+      ''
+    ).trim();
     setImprovingPhaseId(phase.id);
     try {
       const data = await requestPhaseTextImprovement({
@@ -402,15 +450,148 @@ export const LabManager: React.FC<LabManagerProps> = ({
         phaseNumber: phase.numberLabel,
         phaseTitle: phase.title,
         currentDescription: phase.description,
+        customInstruction: customInstruction || undefined,
       });
       handleUpdatePhase(phase.id, {
         description: data.improvedDescription,
       });
+      setOpenAiPromptPhaseId(null);
     } catch (e) {
       console.error(e);
     } finally {
       setImprovingPhaseId(null);
     }
+  };
+
+  // Gestione Caricamento Fattura Amazon (PDF / PNG / JPEG) e Modifica Inline Inventario
+  const handleAmazonInvoiceFileUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsParsingInvoice(true);
+    setInvoiceParseError(null);
+
+    try {
+      let mimeType = file.type || 'image/png';
+      let base64Data = '';
+
+      if (mimeType.startsWith('image/')) {
+        const compressed = await compressImageFileToDataUrl(file, 1400);
+        const commaIdx = compressed.dataUrl.indexOf(',');
+        base64Data =
+          commaIdx >= 0
+            ? compressed.dataUrl.slice(commaIdx + 1)
+            : compressed.dataUrl;
+        mimeType = 'image/png';
+      } else {
+        // Lettura diretta per PDF
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ''));
+          reader.onerror = () =>
+            reject(new Error('Impossibile leggere il file PDF.'));
+          reader.readAsDataURL(file);
+        });
+        const commaIdx = dataUrl.indexOf(',');
+        base64Data = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl;
+        mimeType = 'application/pdf';
+      }
+
+      const extracted = await requestAmazonInvoiceExtraction({
+        mimeType,
+        base64Data,
+        fileName: file.name,
+      });
+
+      setInvoiceDraftMeta({
+        supplier: 'Amazon EU S.à r.l.',
+        invoiceNumber: extracted.invoiceNumber || `AMZ-${Date.now().toString().slice(-5)}`,
+        invoiceDate:
+          extracted.invoiceDate || new Date().toISOString().slice(0, 10),
+      });
+      setInvoiceDraftItems(
+        extracted.items.map((it, idx) => ({
+          ...it,
+          id: it.id || `inv-ext-${Date.now()}-${idx}`,
+          selected: true,
+        }))
+      );
+    } catch (err) {
+      setInvoiceParseError(
+        err instanceof Error
+          ? err.message
+          : 'Errore durante la lettura della fattura Amazon.'
+      );
+    } finally {
+      setIsParsingInvoice(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleConfirmAmazonInvoiceImport = () => {
+    const selectedItems = invoiceDraftItems.filter((it) => it.selected !== false);
+    if (selectedItems.length === 0) return;
+
+    const meta = invoiceDraftMeta || {
+      supplier: 'Amazon EU S.à r.l.',
+      invoiceNumber: `AMZ-${Date.now().toString().slice(-5)}`,
+      invoiceDate: new Date().toISOString().slice(0, 10),
+    };
+
+    if (onImportAmazonInvoice) {
+      onImportAmazonInvoice({
+        supplier: meta.supplier,
+        invoiceNumber: meta.invoiceNumber,
+        invoiceDate: meta.invoiceDate,
+        items: selectedItems,
+        workshopTitle: activeWorkshop.title,
+        workshopId: activeWorkshop.id,
+      });
+    }
+
+    setInvoiceDraftMeta(null);
+    setInvoiceDraftItems([]);
+    setInventoryNotice(
+      `${selectedItems.length} articoli della fattura ${meta.invoiceNumber} inseriti nell'Inventario Totale e registrati in Amministrazione per il Rimborso Spese!`
+    );
+    setTimeout(() => setInventoryNotice(null), 5000);
+  };
+
+  const handleInlineInventoryEdit = (
+    inv: InventoryItem,
+    patch: Partial<InventoryItem>
+  ) => {
+    if (!onUpdateInventoryItem) return;
+    const nextPacks = Math.max(
+      1,
+      Number(patch.packsOrderedTotal ?? inv.packsOrderedTotal)
+    );
+    const nextPiecesPerPack = Math.max(
+      1,
+      Number(patch.piecesPerPack ?? inv.piecesPerPack)
+    );
+    const nextTotalOrdered = nextPacks * nextPiecesPerPack;
+    const nextUsed = Math.max(
+      0,
+      Number(patch.piecesUsedTotal ?? inv.piecesUsedTotal)
+    );
+    const nextAvailable =
+      (patch.costType ?? inv.costType) === 'fixed'
+        ? nextTotalOrdered
+        : Math.max(0, nextTotalOrdered - nextUsed);
+
+    onUpdateInventoryItem({
+      ...inv,
+      ...patch,
+      packsOrderedTotal: nextPacks,
+      piecesPerPack: nextPiecesPerPack,
+      totalPiecesOrdered: nextTotalOrdered,
+      piecesUsedTotal: nextUsed,
+      piecesAvailable: nextAvailable,
+      updatedAt: new Date().toISOString().slice(0, 10),
+      clientUpdatedAt: Date.now(),
+    });
   };
 
   // Gestione Calcolatore Economico (Collegato vs Scollegato & Confezioni × Pezzi)
@@ -590,6 +771,16 @@ export const LabManager: React.FC<LabManagerProps> = ({
               <span>{isSavingCloud ? 'Salvataggio...' : 'Salva su Account'}</span>
             </button>
           )}
+
+          <button
+            type="button"
+            data-testid="open-partner-summary-sheet-btn"
+            onClick={() => setShowPartnerSheetModal(true)}
+            className="flex items-center gap-1.5 px-3.5 py-2 bg-[#1A2B4C] text-[#EADDCD] text-xs font-semibold rounded-lg hover:bg-[#1A2B4C]/90 transition-colors whitespace-nowrap"
+          >
+            <FileText className="w-3.5 h-3.5 text-[#D4A373]" />
+            <span>Scheda Partner (PDF / Riepilogo)</span>
+          </button>
 
           <button
             type="button"
@@ -1455,7 +1646,11 @@ export const LabManager: React.FC<LabManagerProps> = ({
                       <button
                         type="button"
                         data-testid={`improve-phase-ai-btn-${idx}`}
-                        onClick={() => handleImprovePhaseWithAi(phase)}
+                        onClick={() =>
+                          setOpenAiPromptPhaseId((prev) =>
+                            prev === phase.id ? null : phase.id
+                          )
+                        }
                         disabled={isImprovingThis}
                         className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-[#4A6B53] text-[#EADDCD] hover:bg-[#3b5743] transition-colors disabled:opacity-50"
                       >
@@ -1463,10 +1658,87 @@ export const LabManager: React.FC<LabManagerProps> = ({
                         <span>
                           {isImprovingThis
                             ? 'Miglioramento IA in corso...'
+                            : openAiPromptPhaseId === phase.id
+                            ? 'Chiudi Box IA'
                             : 'Migliora testo con IA'}
                         </span>
                       </button>
                     </div>
+
+                    {/* Box Piccolo Inline sotto la casella di testo per manipolare il testo con IA Base Gratis */}
+                    {openAiPromptPhaseId === phase.id && (
+                      <div
+                        data-testid={`phase-ai-inline-box-${idx}`}
+                        className="p-3 bg-[#F4ECE1] border border-[#4A6B53]/40 rounded-lg space-y-2 shadow-sm"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-bold text-[#4A6B53] flex items-center gap-1">
+                            <Sparkles className="w-3 h-3" />
+                            <span>
+                              Richiesta di manipolazione testo (IA Base Gratis · Low-Token)
+                            </span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setOpenAiPromptPhaseId(null)}
+                            className="text-[#1A2B4C]/60 hover:text-[#1A2B4C]"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+
+                        <div className="flex flex-wrap gap-1.5">
+                          {[
+                            'Spiega meglio gli strumenti usati e come verranno usati',
+                            'Adatta il testo per la Scheda Riassuntiva Partner',
+                            'Rendi più sintetico e schematico',
+                            'Rendi il tono più caldo e conviviale',
+                          ].map((chip) => (
+                            <button
+                              key={chip}
+                              type="button"
+                              onClick={() => {
+                                setPhaseAiInstructionMap((prev) => ({
+                                  ...prev,
+                                  [phase.id]: chip,
+                                }));
+                                handleImprovePhaseWithAi(phase, chip);
+                              }}
+                              disabled={isImprovingThis}
+                              className="px-2 py-1 rounded text-[10px] font-medium bg-[#EADDCD] hover:bg-[#1A2B4C] hover:text-[#EADDCD] text-[#1A2B4C] transition-colors"
+                            >
+                              {chip}
+                            </button>
+                          ))}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            data-testid={`phase-ai-custom-input-${idx}`}
+                            value={phaseAiInstructionMap[phase.id] || ''}
+                            onChange={(e) =>
+                              setPhaseAiInstructionMap((prev) => ({
+                                ...prev,
+                                [phase.id]: e.target.value,
+                              }))
+                            }
+                            placeholder="Scrivi come vuoi modificare il testo (es. elenca pennelli e tempi)..."
+                            className="flex-1 px-2.5 py-1.5 bg-[#EADDCD]/80 border border-[#1A2B4C]/20 rounded text-xs text-[#1A2B4C]"
+                          />
+                          <button
+                            type="button"
+                            data-testid={`phase-ai-apply-btn-${idx}`}
+                            onClick={() => handleImprovePhaseWithAi(phase)}
+                            disabled={isImprovingThis}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-[#1A2B4C] text-[#EADDCD] text-xs font-semibold hover:bg-[#1A2B4C]/90 disabled:opacity-50 whitespace-nowrap"
+                          >
+                            <Send className="w-3 h-3 text-[#D4A373]" />
+                            <span>{isImprovingThis ? 'Applico...' : 'Applica IA'}</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -1940,12 +2212,12 @@ export const LabManager: React.FC<LabManagerProps> = ({
             </div>
           </div>
 
-          {/* 4. Inventario Totale del Format (Magazzino Aggiornato tra i Laboratori) */}
+          {/* 4. Inventario Totale del Format (Magazzino Aggiornato tra i Laboratori + Lettura Fatture Amazon PDF/PNG/JPEG + Modifica Inline) */}
           <div
             data-testid="format-inventory-section"
-            className="bg-[#F4ECE1] border border-[#1A2B4C]/15 rounded-xl p-5 space-y-3"
+            className="bg-[#F4ECE1] border border-[#1A2B4C]/15 rounded-xl p-5 space-y-4"
           >
-            <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <PackageCheck className="w-5 h-5 text-[#4A6B53]" />
                 <div>
@@ -1956,53 +2228,411 @@ export const LabManager: React.FC<LabManagerProps> = ({
                     Inventario Totale del Format ({inventory.length} referenze in magazzino)
                   </h3>
                   <p className="text-xs text-[#1A2B4C]/70">
-                    Scorte cumulative aggiornate in base ai prodotti ordinati e ai laboratori svolti
+                    Carica fatture Amazon (PDF, PNG, JPEG) per estrarre i materiali con l&apos;IA e modifica liberamente ogni cella della tabella
                   </p>
                 </div>
               </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <label
+                  data-testid="upload-amazon-invoice-label"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-[#B85B43] text-[#EADDCD] hover:bg-[#a04c36] cursor-pointer transition-colors"
+                >
+                  <Receipt className="w-3.5 h-3.5" />
+                  <span>
+                    {isParsingInvoice
+                      ? 'Lettura Fattura Amazon in corso...'
+                      : 'Carica Fattura Amazon (PDF / PNG / JPEG)'}
+                  </span>
+                  <input
+                    data-testid="upload-amazon-invoice-input"
+                    type="file"
+                    accept="application/pdf,image/png,image/jpeg,image/webp"
+                    onChange={handleAmazonInvoiceFileUpload}
+                    disabled={isParsingInvoice}
+                    className="hidden"
+                  />
+                </label>
+              </div>
             </div>
 
+            {invoiceParseError && (
+              <div
+                role="alert"
+                className="p-3 bg-[#B85B43]/15 border border-[#B85B43]/30 rounded-lg text-xs font-semibold text-[#B85B43]"
+              >
+                {invoiceParseError}
+              </div>
+            )}
+
+            {/* Pannello Anteprima Editabile Fattura Amazon Estratta prima della conferma in Inventario */}
+            {invoiceDraftItems.length > 0 && invoiceDraftMeta && (
+              <div
+                data-testid="amazon-invoice-preview-panel"
+                className="p-4 bg-[#EADDCD] border-2 border-[#B85B43]/50 rounded-xl space-y-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#1A2B4C]/15 pb-2.5">
+                  <div>
+                    <span className="text-xs font-bold uppercase tracking-wider text-[#B85B43]">
+                      Anteprima Articoli Estratti dalla Fattura Amazon (Modifica prima di confermare)
+                    </span>
+                    <p className="text-[11px] text-[#1A2B4C]/75">
+                      Verifica e correggi nomi, costi unitari, confezioni e pezzi per confezione prima di inserirli nell&apos;Inventario Totale.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInvoiceDraftMeta(null);
+                      setInvoiceDraftItems([]);
+                    }}
+                    className="p-1 text-[#1A2B4C]/60 hover:text-[#1A2B4C]"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <div>
+                    <label className="block text-[10px] font-semibold text-[#1A2B4C] mb-1">
+                      Fornitore Fattura
+                    </label>
+                    <input
+                      type="text"
+                      value={invoiceDraftMeta.supplier}
+                      onChange={(e) =>
+                        setInvoiceDraftMeta((prev) =>
+                          prev ? { ...prev, supplier: e.target.value } : prev
+                        )
+                      }
+                      className="w-full px-2.5 py-1 bg-[#F4ECE1] border border-[#1A2B4C]/20 rounded text-xs text-[#1A2B4C]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-[#1A2B4C] mb-1">
+                      Numero Fattura / Ordine Amazon
+                    </label>
+                    <input
+                      type="text"
+                      value={invoiceDraftMeta.invoiceNumber}
+                      onChange={(e) =>
+                        setInvoiceDraftMeta((prev) =>
+                          prev ? { ...prev, invoiceNumber: e.target.value } : prev
+                        )
+                      }
+                      className="w-full px-2.5 py-1 bg-[#F4ECE1] border border-[#1A2B4C]/20 rounded text-xs font-mono text-[#1A2B4C]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-[#1A2B4C] mb-1">
+                      Data Fattura
+                    </label>
+                    <input
+                      type="date"
+                      value={invoiceDraftMeta.invoiceDate}
+                      onChange={(e) =>
+                        setInvoiceDraftMeta((prev) =>
+                          prev ? { ...prev, invoiceDate: e.target.value } : prev
+                        )
+                      }
+                      className="w-full px-2.5 py-1 bg-[#F4ECE1] border border-[#1A2B4C]/20 rounded text-xs font-mono text-[#1A2B4C]"
+                    />
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto border border-[#1A2B4C]/15 rounded-lg bg-[#F4ECE1]">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="border-b border-[#1A2B4C]/15 bg-[#EADDCD] text-[#1A2B4C]">
+                        <th className="py-2 px-2">Inc.</th>
+                        <th className="py-2 px-2.5">Materiale Estratto</th>
+                        <th className="py-2 px-2">Tipo</th>
+                        <th className="py-2 px-2 text-right">Costo Conf. (€)</th>
+                        <th className="py-2 px-2 text-right">Conf.</th>
+                        <th className="py-2 px-2 text-right">Pezzi/Conf.</th>
+                        <th className="py-2 px-2 text-right">Rimuovi</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#1A2B4C]/10">
+                      {invoiceDraftItems.map((item, idx) => (
+                        <tr key={item.id}>
+                          <td className="py-1.5 px-2">
+                            <input
+                              type="checkbox"
+                              checked={item.selected !== false}
+                              onChange={(e) =>
+                                setInvoiceDraftItems((prev) =>
+                                  prev.map((r, i) =>
+                                    i === idx ? { ...r, selected: e.target.checked } : r
+                                  )
+                                )
+                              }
+                              className="w-4 h-4 accent-[#4A6B53]"
+                            />
+                          </td>
+                          <td className="py-1.5 px-2.5">
+                            <input
+                              type="text"
+                              value={item.name}
+                              onChange={(e) =>
+                                setInvoiceDraftItems((prev) =>
+                                  prev.map((r, i) =>
+                                    i === idx ? { ...r, name: e.target.value } : r
+                                  )
+                                )
+                              }
+                              className="w-full px-2 py-1 bg-[#EADDCD]/60 rounded text-xs font-semibold text-[#1A2B4C]"
+                            />
+                          </td>
+                          <td className="py-1.5 px-2">
+                            <select
+                              value={item.costType}
+                              onChange={(e) =>
+                                setInvoiceDraftItems((prev) =>
+                                  prev.map((r, i) =>
+                                    i === idx
+                                      ? {
+                                          ...r,
+                                          costType: e.target.value as 'fixed' | 'variable',
+                                        }
+                                      : r
+                                  )
+                                )
+                              }
+                              className="px-1.5 py-1 rounded bg-[#EADDCD] text-[11px] font-semibold text-[#1A2B4C]"
+                            >
+                              <option value="variable">Consumabile</option>
+                              <option value="fixed">Fisso (Riutil.)</option>
+                            </select>
+                          </td>
+                          <td className="py-1.5 px-2 text-right">
+                            <input
+                              type="number"
+                              min={0}
+                              step={0.1}
+                              value={item.unitCost}
+                              onChange={(e) =>
+                                setInvoiceDraftItems((prev) =>
+                                  prev.map((r, i) =>
+                                    i === idx
+                                      ? { ...r, unitCost: Math.max(0, Number(e.target.value)) }
+                                      : r
+                                  )
+                                )
+                              }
+                              className="w-16 text-right px-1.5 py-1 bg-[#EADDCD]/60 rounded font-mono text-xs text-[#1A2B4C]"
+                            />
+                          </td>
+                          <td className="py-1.5 px-2 text-right">
+                            <input
+                              type="number"
+                              min={1}
+                              step={1}
+                              value={item.packsOrdered}
+                              onChange={(e) =>
+                                setInvoiceDraftItems((prev) =>
+                                  prev.map((r, i) =>
+                                    i === idx
+                                      ? {
+                                          ...r,
+                                          packsOrdered: Math.max(1, Number(e.target.value)),
+                                        }
+                                      : r
+                                  )
+                                )
+                              }
+                              className="w-12 text-right px-1.5 py-1 bg-[#EADDCD]/60 rounded font-mono text-xs text-[#1A2B4C]"
+                            />
+                          </td>
+                          <td className="py-1.5 px-2 text-right">
+                            <input
+                              type="number"
+                              min={1}
+                              step={1}
+                              value={item.piecesPerPack}
+                              onChange={(e) =>
+                                setInvoiceDraftItems((prev) =>
+                                  prev.map((r, i) =>
+                                    i === idx
+                                      ? {
+                                          ...r,
+                                          piecesPerPack: Math.max(1, Number(e.target.value)),
+                                        }
+                                      : r
+                                  )
+                                )
+                              }
+                              className="w-12 text-right px-1.5 py-1 bg-[#EADDCD]/60 rounded font-mono text-xs text-[#1A2B4C]"
+                            />
+                          </td>
+                          <td className="py-1.5 px-2 text-right">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setInvoiceDraftItems((prev) =>
+                                  prev.filter((_, i) => i !== idx)
+                                )
+                              }
+                              className="p-1 text-[#B85B43] hover:bg-[#B85B43]/15 rounded"
+                            >
+                              <Trash2 className="w-3.5 h-3.5 inline" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setInvoiceDraftItems((prev) => [
+                        ...prev,
+                        {
+                          id: `inv-ext-${Date.now()}`,
+                          name: 'Nuovo Articolo Fattura',
+                          unitCost: 12.0,
+                          packsOrdered: 1,
+                          piecesPerPack: 10,
+                          costType: 'variable',
+                          selected: true,
+                        },
+                      ])
+                    }
+                    className="px-2.5 py-1 rounded text-xs font-semibold bg-[#F4ECE1] text-[#1A2B4C] border border-[#1A2B4C]/20"
+                  >
+                    + Aggiungi Riga Fattura
+                  </button>
+
+                  <button
+                    type="button"
+                    data-testid="confirm-amazon-invoice-import-btn"
+                    onClick={handleConfirmAmazonInvoiceImport}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-[#4A6B53] text-[#EADDCD] hover:bg-[#3c5944]"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Conferma in Inventario e Registra Fattura in Amministrazione</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Tabella Inventario Totale del Format con Modifica Inline di tutti i campi */}
             <div className="overflow-x-auto border border-[#1A2B4C]/15 rounded-lg bg-[#EADDCD]/50">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
                   <tr className="border-b border-[#1A2B4C]/15 bg-[#EADDCD] text-[#1A2B4C]">
-                    <th className="py-2 px-3 font-semibold">Articolo in Magazzino</th>
-                    <th className="py-2 px-2.5 font-semibold">Tipo</th>
-                    <th className="py-2 px-2.5 font-semibold text-right">Conf. × Pz</th>
-                    <th className="py-2 px-2.5 font-semibold text-right">Tot. Ordinati</th>
-                    <th className="py-2 px-2.5 font-semibold text-right">Usati nei Lab</th>
-                    <th className="py-2 px-2.5 font-semibold text-right">Scorta Disponibile</th>
+                    <th className="py-2 px-3 font-semibold">Articolo in Magazzino (Editabile)</th>
+                    <th className="py-2 px-2 font-semibold">Tipo</th>
+                    <th className="py-2 px-2 font-semibold text-right">Costo €</th>
+                    <th className="py-2 px-2 font-semibold text-right">Conf. × Pz</th>
+                    <th className="py-2 px-2 font-semibold text-right">Tot. Ord.</th>
+                    <th className="py-2 px-2 font-semibold text-right">Usati</th>
+                    <th className="py-2 px-2.5 font-semibold text-right">Disponibili</th>
                     <th className="py-2 px-3 font-semibold text-right">Azioni</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#1A2B4C]/10">
                   {inventory.map((inv) => (
                     <tr key={inv.id} className="hover:bg-[#EADDCD]/80">
-                      <td className="py-2 px-3">
-                        <div className="font-semibold text-[#1A2B4C]">{inv.name}</div>
+                      <td className="py-2 px-3 min-w-[180px]">
+                        <input
+                          type="text"
+                          value={inv.name}
+                          onChange={(e) =>
+                            handleInlineInventoryEdit(inv, { name: e.target.value })
+                          }
+                          aria-label={`Modifica nome articolo inventario ${inv.name}`}
+                          className="w-full bg-transparent font-semibold text-[#1A2B4C] focus:outline-none focus:underline"
+                        />
                         <div className="text-[10px] text-[#1A2B4C]/60">
-                          Ultimo lab: {inv.lastWorkshopTitle}
+                          Fonte: {inv.lastWorkshopTitle}
                         </div>
                       </td>
-                      <td className="py-2 px-2.5">
-                        <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
+                      <td className="py-2 px-2">
+                        <select
+                          value={inv.costType}
+                          onChange={(e) =>
+                            handleInlineInventoryEdit(inv, {
+                              costType: e.target.value as 'fixed' | 'variable',
+                            })
+                          }
+                          aria-label={`Tipo costo inventario ${inv.name}`}
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
                             inv.costType === 'fixed'
                               ? 'bg-[#1A2B4C]/10 text-[#1A2B4C]'
                               : 'bg-[#4A6B53]/15 text-[#4A6B53]'
                           }`}
                         >
-                          {inv.costType === 'fixed' ? 'Fisso (Riutil.)' : 'Consumabile'}
-                        </span>
+                          <option value="fixed">Fisso (Riutil.)</option>
+                          <option value="variable">Consumabile</option>
+                        </select>
                       </td>
-                      <td className="py-2 px-2.5 text-right font-mono tabular-nums">
-                        {inv.packsOrderedTotal} × {inv.piecesPerPack}
+                      <td className="py-2 px-2 text-right font-mono tabular-nums whitespace-nowrap">
+                        <input
+                          type="number"
+                          min={0}
+                          step={0.1}
+                          value={inv.unitCost}
+                          onChange={(e) =>
+                            handleInlineInventoryEdit(inv, {
+                              unitCost: Math.max(0, Number(e.target.value)),
+                            })
+                          }
+                          aria-label={`Costo unitario inventario ${inv.name}`}
+                          className="w-14 text-right bg-[#F4ECE1]/80 px-1 py-0.5 rounded font-mono text-xs text-[#1A2B4C]"
+                        />
                       </td>
-                      <td className="py-2 px-2.5 text-right font-mono tabular-nums">
+                      <td className="py-2 px-2 text-right font-mono tabular-nums whitespace-nowrap">
+                        <div className="inline-flex items-center gap-1">
+                          <input
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={inv.packsOrderedTotal}
+                            onChange={(e) =>
+                              handleInlineInventoryEdit(inv, {
+                                packsOrderedTotal: Math.max(1, Number(e.target.value)),
+                              })
+                            }
+                            aria-label={`Confezioni ordinate inventario ${inv.name}`}
+                            className="w-11 text-right bg-[#F4ECE1]/80 px-1 py-0.5 rounded font-mono text-xs text-[#1A2B4C]"
+                          />
+                          <span>×</span>
+                          <input
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={inv.piecesPerPack}
+                            onChange={(e) =>
+                              handleInlineInventoryEdit(inv, {
+                                piecesPerPack: Math.max(1, Number(e.target.value)),
+                              })
+                            }
+                            aria-label={`Pezzi per confezione inventario ${inv.name}`}
+                            className="w-11 text-right bg-[#F4ECE1]/80 px-1 py-0.5 rounded font-mono text-xs text-[#1A2B4C]"
+                          />
+                        </div>
+                      </td>
+                      <td className="py-2 px-2 text-right font-mono tabular-nums">
                         {inv.totalPiecesOrdered} pz
                       </td>
-                      <td className="py-2 px-2.5 text-right font-mono tabular-nums text-[#B85B43]">
-                        {inv.piecesUsedTotal} pz
+                      <td className="py-2 px-2 text-right font-mono tabular-nums text-[#B85B43]">
+                        <input
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={inv.piecesUsedTotal}
+                          onChange={(e) =>
+                            handleInlineInventoryEdit(inv, {
+                              piecesUsedTotal: Math.max(0, Number(e.target.value)),
+                            })
+                          }
+                          aria-label={`Pezzi usati inventario ${inv.name}`}
+                          className="w-12 text-right bg-[#F4ECE1]/80 px-1 py-0.5 rounded font-mono text-xs text-[#B85B43]"
+                        />
                       </td>
                       <td className="py-2 px-2.5 text-right font-mono tabular-nums font-bold text-[#4A6B53]">
                         {inv.piecesAvailable} pz
@@ -2207,6 +2837,97 @@ export const LabManager: React.FC<LabManagerProps> = ({
                     : 'Conferma e Salva su Google Calendar'}
                 </span>
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modale Scheda Riassuntiva per il Partner (PDF + Riepilogo WhatsApp/Email SENZA margini interni) */}
+      {showPartnerSheetModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="partner-sheet-modal-title"
+          className="fixed inset-0 z-50 bg-[#1A2B4C]/65 flex items-center justify-center p-4"
+        >
+          <div className="bg-[#F4ECE1] border border-[#1A2B4C]/25 rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-xl max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-[#1A2B4C]/10 pb-3">
+              <div className="flex items-center gap-2">
+                <FileText className="w-5 h-5 text-[#B85B43]" />
+                <div>
+                  <h3
+                    id="partner-sheet-modal-title"
+                    className="text-base font-bold text-[#1A2B4C]"
+                    style={{ fontFamily: '"Fraunces", serif' }}
+                  >
+                    Scheda Riassuntiva per il Partner ({selectedPartner?.name || activeWorkshop.location})
+                  </h3>
+                  <p className="text-[11px] text-[#4A6B53] font-semibold">
+                    Zero dati riservati: costi materiali, break-even e margini del format sono completamente esclusi.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowPartnerSheetModal(false)}
+                className="p-1 text-[#1A2B4C]/60 hover:text-[#1A2B4C]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <pre
+              data-testid="partner-summary-preview-text"
+              className="flex-1 overflow-y-auto whitespace-pre-wrap font-sans text-xs text-[#1A2B4C] bg-[#EADDCD]/85 p-4 rounded-xl border border-[#1A2B4C]/15 leading-relaxed"
+            >
+              {buildPartnerSummaryText(activeWorkshop, selectedPartner)}
+            </pre>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#1A2B4C]/10">
+              <button
+                type="button"
+                data-testid="copy-partner-summary-btn"
+                onClick={() => {
+                  const text = buildPartnerSummaryText(activeWorkshop, selectedPartner);
+                  navigator.clipboard?.writeText(text).catch(() => {});
+                  setCopiedPartnerSummary(true);
+                  setTimeout(() => setCopiedPartnerSummary(false), 2200);
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-[#EADDCD] border border-[#1A2B4C]/25 text-[#1A2B4C] hover:bg-[#1A2B4C]/10"
+              >
+                {copiedPartnerSummary ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-[#4A6B53]" />
+                    <span>Riepilogo Copiato per WhatsApp / Email!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Copia Testo per WhatsApp / Email</span>
+                  </>
+                )}
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowPartnerSheetModal(false)}
+                  className="px-3.5 py-2 rounded-lg text-xs font-semibold text-[#1A2B4C] bg-[#EADDCD]"
+                >
+                  Chiudi
+                </button>
+                <button
+                  type="button"
+                  data-testid="download-partner-summary-pdf-btn"
+                  onClick={() =>
+                    exportPartnerSummaryPdf(activeWorkshop, selectedPartner)
+                  }
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-[#1A2B4C] text-[#EADDCD] hover:bg-[#1A2B4C]/90"
+                >
+                  <FileDown className="w-3.5 h-3.5 text-[#D4A373]" />
+                  <span>Scarica Scheda Partner PDF</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>

@@ -148,6 +148,11 @@ export interface UploadedPngAsset {
   createdAt: number;
 }
 
+export type PartnerBureaucracyMode =
+  | 'association-receipt'
+  | 'partner-cashdesk-rebill'
+  | 'split-checkout';
+
 export interface PartnerProfile {
   id: string;
   name: string;
@@ -161,7 +166,68 @@ export interface PartnerProfile {
   logoShape: PartnerLogoShape;
   fontStyle: FontStyleId;
   palette: string[]; // 3-4 colori esadecimali del partner
+  bureaucracyMode?: PartnerBureaucracyMode;
+  fiscalNotes?: string;
   clientUpdatedAt?: number;
+}
+
+export interface ExtractedInvoiceLineItem {
+  id: string;
+  name: string;
+  unitCost: number;
+  packsOrdered: number;
+  piecesPerPack: number;
+  costType: 'fixed' | 'variable';
+  selected: boolean;
+  invoiceNumber?: string;
+  invoiceDate?: string;
+}
+
+export type ExpenseVoucherCategory =
+  | 'amazon-invoice'
+  | 'materials-receipt'
+  | 'mileage-reimbursement'
+  | 'partner-settlement'
+  | 'other';
+
+export interface ExpenseVoucher {
+  id: string;
+  description: string;
+  voucherDate: string; // YYYY-MM-DD
+  category: ExpenseVoucherCategory;
+  amount: number;
+  paidBy: 'personal-advance' | 'association-direct';
+  reimbursementStatus: 'pending' | 'reimbursed' | 'not-applicable';
+  invoiceNumber: string;
+  workshopId: string;
+  partnerId: string;
+  kilometers: number;
+  kmRate: number;
+  notes: string;
+  clientUpdatedAt?: number;
+}
+
+export interface WorkshopAccountingRecord {
+  workshopId: string;
+  actualPax: number;
+  collectionMethod: 'association-direct' | 'partner-cashdesk' | 'split-checkout';
+  partnerPayoutStatus: 'pending' | 'settled';
+  accountingNotes: string;
+}
+
+export interface FormatBalanceSheetMetrics {
+  totalGrossRevenue: number;
+  totalPartnerVenueShare: number;
+  totalAssociationNetRevenue: number;
+  totalWorkshopMaterialsCost: number;
+  totalVouchersDocumented: number;
+  totalPersonalAdvancesPending: number;
+  totalPersonalAdvancesReimbursed: number;
+  totalAssociationDirectExpenses: number;
+  associationCashAvailableBeforeReimbursements: number;
+  associationCashResidualAfterReimbursements: number;
+  maxClaimableReimbursementNow: number;
+  pendingPartnerSettlementsTotal: number;
 }
 
 export interface OperationalPhase {

@@ -160,6 +160,37 @@ service cloud.firestore {
       data.updatedAt is timestamp;
     }
 
+    function isValidExpenseVoucher(data) {
+      return data.keys().hasAll([
+        'description', 'voucherDate', 'category', 'amount', 'paidBy',
+        'reimbursementStatus', 'invoiceNumber', 'workshopId', 'partnerId',
+        'kilometers', 'kmRate', 'notes', 'clientUpdatedAt', 'ownerId', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'description', 'voucherDate', 'category', 'amount', 'paidBy',
+        'reimbursementStatus', 'invoiceNumber', 'workshopId', 'partnerId',
+        'kilometers', 'kmRate', 'notes', 'clientUpdatedAt', 'ownerId', 'createdAt', 'updatedAt'
+      ]) &&
+      data.description is string && data.description.size() >= 1 && data.description.size() <= 200 &&
+      data.voucherDate is string && data.voucherDate.size() >= 1 && data.voucherDate.size() <= 20 &&
+      data.category is string && data.category.size() >= 1 && data.category.size() <= 40 &&
+      data.amount is number && data.amount >= 0 && data.amount <= 1000000 &&
+      data.paidBy is string && data.paidBy.size() >= 1 && data.paidBy.size() <= 40 &&
+      data.reimbursementStatus is string && data.reimbursementStatus.size() >= 1 && data.reimbursementStatus.size() <= 40 &&
+      data.invoiceNumber is string && data.invoiceNumber.size() <= 80 &&
+      data.workshopId is string && data.workshopId.size() <= 128 &&
+      data.partnerId is string && data.partnerId.size() <= 128 &&
+      data.kilometers is number && data.kilometers >= 0 && data.kilometers <= 50000 &&
+      data.kmRate is number && data.kmRate >= 0 && data.kmRate <= 50 &&
+      data.notes is string && data.notes.size() <= 1000 &&
+      data.clientUpdatedAt is number && data.clientUpdatedAt >= 0 &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
+      data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
     match /workshops/{workshopId} {
       allow get: if isSignedIn() && isValidId(workshopId) && existing().ownerId == request.auth.uid;
       allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
@@ -232,6 +263,24 @@ service cloud.firestore {
           'backgroundColor', 'partnerId', 'elements', 'clipboard', 'clientUpdatedAt', 'updatedAt'
         ]);
       allow delete: if isSignedIn() && isValidId(templateId) && existing().ownerId == request.auth.uid;
+    }
+
+    match /vouchers/{voucherId} {
+      allow get: if isSignedIn() && isValidId(voucherId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(voucherId) && isValidExpenseVoucher(incoming()) &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isSignedIn() && isValidId(voucherId) && isValidExpenseVoucher(incoming()) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'description', 'voucherDate', 'category', 'amount', 'paidBy',
+          'reimbursementStatus', 'invoiceNumber', 'workshopId', 'partnerId',
+          'kilometers', 'kmRate', 'notes', 'clientUpdatedAt', 'updatedAt'
+        ]);
+      allow delete: if isSignedIn() && isValidId(voucherId) && existing().ownerId == request.auth.uid;
     }
   }
 }

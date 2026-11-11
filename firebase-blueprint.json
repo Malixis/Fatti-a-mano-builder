@@ -455,6 +455,118 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "ExpenseVoucher": {
+      "title": "ExpenseVoucher",
+      "description": "Giustificativo di spesa, fattura Amazon o nota rimborso spese associativa per il bilancio d'esercizio del format.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Descrizione della spesa, fattura Amazon o trasferta associativa",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "voucherDate": {
+          "type": "string",
+          "description": "Data del documento o della spesa YYYY-MM-DD",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "category": {
+          "type": "string",
+          "description": "Categoria contabile (amazon-invoice, materials-receipt, mileage-reimbursement, partner-settlement, other)",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "amount": {
+          "type": "number",
+          "description": "Importo totale in Euro"
+        },
+        "paidBy": {
+          "type": "string",
+          "description": "Chi ha sostenuto il pagamento (personal-advance o association-direct)",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "reimbursementStatus": {
+          "type": "string",
+          "description": "Stato del rimborso dall'Associazione (pending, reimbursed, not-applicable)",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "invoiceNumber": {
+          "type": "string",
+          "description": "Numero fattura Amazon o riferimento ricevuta",
+          "minLength": 0,
+          "maxLength": 80
+        },
+        "workshopId": {
+          "type": "string",
+          "description": "ID del laboratorio collegato (opzionale)",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "partnerId": {
+          "type": "string",
+          "description": "ID del partner collegato (opzionale)",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "kilometers": {
+          "type": "number",
+          "description": "Chilometri percorsi A/R per rimborso chilometrico associativo"
+        },
+        "kmRate": {
+          "type": "number",
+          "description": "Tariffa chilometrica €/km applicata"
+        },
+        "notes": {
+          "type": "string",
+          "description": "Note amministrative, modalità burocratica partner o causale bonifico",
+          "minLength": 0,
+          "maxLength": 1000
+        },
+        "clientUpdatedAt": {
+          "type": "number",
+          "description": "Timestamp client in millisecondi per risoluzione conflitti cross-device"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID Firebase dell'utente proprietario",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp di creazione server"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp di ultimo aggiornamento server"
+        }
+      },
+      "required": [
+        "description",
+        "voucherDate",
+        "category",
+        "amount",
+        "paidBy",
+        "reimbursementStatus",
+        "invoiceNumber",
+        "workshopId",
+        "partnerId",
+        "kilometers",
+        "kmRate",
+        "notes",
+        "clientUpdatedAt",
+        "ownerId",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -481,6 +593,12 @@
         "$ref": "#/entities/DesignTemplate"
       },
       "description": "Collezione dei progetti grafici e locandine vettoriali salvati per ciascuna scheda laboratorio."
+    },
+    "/vouchers/{voucherId}": {
+      "schema": {
+        "$ref": "#/entities/ExpenseVoucher"
+      },
+      "description": "Collezione dei giustificativi di spesa, fatture Amazon e note rimborso spese dell'Associazione."
     }
   }
 }

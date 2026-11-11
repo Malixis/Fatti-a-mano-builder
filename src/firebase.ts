@@ -25,6 +25,7 @@ import {
 import firebaseConfig from '../firebase-applet-config.json';
 import {
   CanvasPresetId,
+  ExpenseVoucher,
   InventoryItem,
   PartnerProfile,
   VectorElement,
@@ -33,6 +34,7 @@ import {
 } from './types/erp';
 import {
   sanitizeDesignTemplateForFirestore,
+  sanitizeExpenseVoucherForFirestore,
   sanitizeInventoryItemForFirestore,
   sanitizePartnerForFirestore,
   sanitizeWorkshopForFirestore,
@@ -681,3 +683,63 @@ export function subscribeUserTemplates(
     }
   );
 }
+
+export async function saveVoucherToCloud(
+  voucher: ExpenseVoucher,
+  user: User
+): Promise<void> {
+  const cleanId = voucher.id.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
+  const sanitized = sanitizeExpenseVoucherForFirestore(voucher, user.uid);
+  await upsertCloudDoc('vouchers', cleanId, sanitized);
+}
+
+export async function deleteVoucherFromCloud(voucherId: string): Promise<void> {
+  const cleanId = voucherId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
+  const path = `vouchers/${cleanId}`;
+  try {
+    await deleteDoc(doc(db, 'vouchers', cleanId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export function subscribeUserVouchers(
+  userId: string,
+  onUpdate: (vouchers: ExpenseVoucher[]) => void
+) {
+  const q = query(collection(db, 'vouchers'), where('ownerId', '==', userId));
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const items: ExpenseVoucher[] = [];
+      snapshot.forEach((docSnap) => {
+        const d = docSnap.data();
+        const serverUpdatedMs =
+          typeof d.updatedAt?.toMillis === 'function' ? d.updatedAt.toMillis() : 0;
+        items.push({
+          id: docSnap.id,
+          description: String(d.description || 'Giustificativo di spesa'),
+          voucherDate: String(d.voucherDate || '2026-11-11'),
+          category: (d.category as ExpenseVoucher['category']) || 'amazon-invoice',
+          amount: Number(d.amount) || 0,
+          paidBy:
+            d.paidBy === 'association-direct' ? 'association-direct' : 'personal-advance',
+          reimbursementStatus:
+            (d.reimbursementStatus as ExpenseVoucher['reimbursementStatus']) || 'pending',
+          invoiceNumber: String(d.invoiceNumber || ''),
+          workshopId: String(d.workshopId || ''),
+          partnerId: String(d.partnerId || ''),
+          kilometers: Number(d.kilometers) || 0,
+          kmRate: Number(d.kmRate) || 0,
+          notes: String(d.notes || ''),
+          clientUpdatedAt: Number(d.clientUpdatedAt) || serverUpdatedMs || 1,
+        });
+      });
+      onUpdate(items);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'vouchers');
+    }
+  );
+}
+

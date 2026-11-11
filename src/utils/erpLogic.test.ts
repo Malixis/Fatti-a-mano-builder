@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  calculateFormatBalanceSheet,
   calculateWorkshopRoi,
   computeMaterialRowBreakdown,
   mergeConfirmedMaterialsIntoInventory,
+  mergeInvoiceItemsIntoInventory,
   sanitizeDesignTemplateForFirestore,
   sanitizeWorkshopForFirestore,
 } from './roiCalculator';
+import { buildPartnerSummaryText } from './pdfExporter';
 import {
   alignAndDistributeElements,
   buildBezierPathFromNodes,
@@ -25,6 +28,8 @@ import {
 } from './vectorMath';
 import {
   BezierNode,
+  ExpenseVoucher,
+  ExtractedInvoiceLineItem,
   FONT_DECLINATIONS,
   InventoryItem,
   MaterialItem,
@@ -355,5 +360,81 @@ test('buildBezierPathFromNodes and alignAndDistributeElements support Pen tool c
   );
   assert.equal(alignedLeftSelection[1].x, 200);
 });
+
+test('mergeInvoiceItemsIntoInventory, calculateFormatBalanceSheet, and buildPartnerSummaryText work accurately and protect internal margins', () => {
+  const invoiceItems: ExtractedInvoiceLineItem[] = [
+    {
+      id: 'amz-1',
+      name: 'Tela 100% cotone 30x40cm (confezione 10 pz)',
+      unitCost: 21.0,
+      packsOrdered: 2,
+      piecesPerPack: 10,
+      costType: 'variable',
+      selected: true,
+    },
+  ];
+
+  const mergedInv = mergeInvoiceItemsIntoInventory([], invoiceItems, 'Fattura Amazon AMZ-99');
+  assert.equal(mergedInv.length, 1);
+  assert.equal(mergedInv[0].totalPiecesOrdered, 20);
+  assert.equal(mergedInv[0].piecesAvailable, 20);
+
+  const sampleWs: WorkshopCard = {
+    id: 'ws-1',
+    title: 'Paint & Wine — Botanica Matisse',
+    subtitle: 'Dipingi sorseggiando vino naturale',
+    location: 'Osteria del Cortile',
+    dateLabel: 'Giovedì 19 Novembre · Ore 19:30',
+    category: 'Paint & Wine',
+    ticketPrice: 20,
+    venueFeePerPax: 6.5,
+    targetPax: 20,
+    phase1Setup: 'Allestimento cavalletti',
+    phase2Execution: 'Pittura su tela',
+    phase3Closing: 'Asciugatura e brindisi',
+    materials: [
+      {
+        id: 'm1',
+        name: 'Cavalletti in faggio',
+        unitCost: 90,
+        quantity: 20,
+        costType: 'fixed',
+      },
+    ],
+  };
+
+  const vouchers: ExpenseVoucher[] = [
+    {
+      id: 'v1',
+      voucherDate: '2026-11-10',
+      invoiceNumber: 'AMZ-01',
+      category: 'amazon-invoice',
+      description: 'Acquisto tele e pennelli',
+      amount: 110,
+      paidBy: 'personal-advance',
+      reimbursementStatus: 'pending',
+      workshopId: 'ws-1',
+      partnerId: 'partner-osteria-cortile',
+      kilometers: 0,
+      kmRate: 0,
+      notes: 'Amazon EU',
+    },
+  ];
+
+  const balance = calculateFormatBalanceSheet([sampleWs], vouchers, {});
+  assert.equal(balance.totalGrossRevenue, 400); // 20 * 20
+  assert.equal(balance.totalPartnerVenueShare, 130); // 20 * 6.5
+  assert.equal(balance.totalAssociationNetRevenue, 270); // 400 - 130
+  assert.equal(balance.totalPersonalAdvancesPending, 110);
+  assert.equal(balance.maxClaimableReimbursementNow, 110);
+
+  const summaryText = buildPartnerSummaryText(sampleWs);
+  assert.ok(summaryText.includes('Paint & Wine — Botanica Matisse'));
+  assert.ok(summaryText.includes('€130.00')); // Partner split 6.50 * 20
+  assert.ok(!summaryText.includes('90'), 'Partner summary must NEVER expose internal material costs (90€)');
+  assert.ok(!summaryText.toLowerCase().includes('break-even'), 'Partner summary must NEVER expose break-even');
+});
+
+
 
 

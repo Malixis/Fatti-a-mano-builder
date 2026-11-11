@@ -3,22 +3,30 @@ import { User } from 'firebase/auth';
 import {
   BrandColorHex,
   CanvasPresetId,
+  ExpenseVoucher,
+  ExtractedInvoiceLineItem,
   InventoryItem,
   PartnerProfile,
   VectorElement,
+  WorkshopAccountingRecord,
   WorkshopCard,
   WorkshopPosterDesign,
 } from './types/erp';
 import {
   INITIAL_INVENTORY,
   INITIAL_PARTNERS,
+  INITIAL_VOUCHERS,
   INITIAL_WORKSHOPS,
 } from './data/seedWorkshops';
 import {
   createDefaultWorkshopDesign,
   syncPosterElementsWithWorkshop,
 } from './utils/vectorMath';
-import { mergeConfirmedMaterialsIntoInventory } from './utils/roiCalculator';
+import {
+  mergeConfirmedMaterialsIntoInventory,
+  mergeInvoiceItemsIntoInventory,
+} from './utils/roiCalculator';
+import { AdministrationTab } from './components/AdministrationTab';
 import { GraphicBuilder } from './components/GraphicBuilder';
 import { LabManager } from './components/LabManager';
 import {
@@ -27,6 +35,7 @@ import {
   deleteInventoryItemFromCloud,
   deletePartnerFromCloud,
   deleteTemplateFromCloud,
+  deleteVoucherFromCloud,
   deleteWorkshopFromCloud,
   isUnauthorizedDomainError,
   loginWithGoogle,
@@ -34,22 +43,26 @@ import {
   saveInventoryItemToCloud,
   savePartnerToCloud,
   saveTemplateToCloud,
+  saveVoucherToCloud,
   saveWorkshopToCloud,
   subscribeToAuth,
   subscribeUserInventory,
   subscribeUserPartners,
   subscribeUserTemplates,
+  subscribeUserVouchers,
   subscribeUserWorkshops,
   syncWorkshopToGoogleCalendar,
 } from './firebase';
 import { Check, Copy, ExternalLink, ShieldAlert, X } from 'lucide-react';
 
-type ActiveModuleTab = 'lab-manager' | 'graphic-builder';
+type ActiveModuleTab = 'lab-manager' | 'administration' | 'graphic-builder';
 
 const STORAGE_KEYS = {
   WORKSHOPS: 'fatti_a_mano_workshops_v3',
   PARTNERS: 'fatti_a_mano_partners_v3',
   INVENTORY: 'fatti_a_mano_inventory_v3',
+  VOUCHERS: 'fatti_a_mano_vouchers_v3',
+  ACCOUNTING_MAP: 'fatti_a_mano_accounting_v3',
   DESIGNS: 'fatti_a_mano_designs_v3',
   ACTIVE_WORKSHOP_ID: 'fatti_a_mano_active_ws_v3',
   // Chiavi v2 per migrazione trasparente
@@ -168,6 +181,12 @@ export default function App() {
   const [inventory, setInventory] = useState<InventoryItem[]>(() =>
     loadLocal(STORAGE_KEYS.INVENTORY, INITIAL_INVENTORY, STORAGE_KEYS.LEGACY_INVENTORY)
   );
+  const [vouchers, setVouchers] = useState<ExpenseVoucher[]>(() =>
+    loadLocal(STORAGE_KEYS.VOUCHERS, INITIAL_VOUCHERS)
+  );
+  const [accountingMap, setAccountingMap] = useState<
+    Record<string, WorkshopAccountingRecord>
+  >(() => loadLocal(STORAGE_KEYS.ACCOUNTING_MAP, {}));
 
   const [activeWorkshopId, setActiveWorkshopId] = useState<string>(() => {
     const savedId = loadLocal<string>(STORAGE_KEYS.ACTIVE_WORKSHOP_ID, '');
@@ -223,7 +242,7 @@ export default function App() {
     return createDefaultWorkshopDesign(activeWorkshop, partner, 0);
   }, [designsByWorkshopId, activeWorkshop, partners]);
 
-  // Persistenza immediata su localStorage ad ogni modifica (Schede, Partner, Inventario, Builder Designs)
+  // Persistenza immediata su localStorage ad ogni modifica (Schede, Partner, Inventario, Vouchers, Accounting, Builder Designs)
   useEffect(() => {
     try {
       window.localStorage.setItem(STORAGE_KEYS.WORKSHOPS, JSON.stringify(workshops));
@@ -247,6 +266,25 @@ export default function App() {
       // ignore
     }
   }, [inventory]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(STORAGE_KEYS.VOUCHERS, JSON.stringify(vouchers));
+    } catch {
+      // ignore
+    }
+  }, [vouchers]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        STORAGE_KEYS.ACCOUNTING_MAP,
+        JSON.stringify(accountingMap)
+      );
+    } catch {
+      // ignore
+    }
+  }, [accountingMap]);
 
   useEffect(() => {
     try {
@@ -510,11 +548,26 @@ export default function App() {
       });
     });
 
+    const unsubVouchers = subscribeUserVouchers(user.uid, (cloudVouchers) => {
+      setVouchers((prevLocal) => {
+        const { merged, localNewerToPush } = mergeByTimestamp(
+          prevLocal,
+          cloudVouchers,
+          deletedIdsRef.current
+        );
+        for (const v of localNewerToPush) {
+          saveVoucherToCloud(v, user).catch((e) => console.error(e));
+        }
+        return merged;
+      });
+    });
+
     return () => {
       unsubWorkshops();
       unsubPartners();
       unsubInventory();
       unsubTemplates();
+      unsubVouchers();
     };
   }, [user]);
 
@@ -711,7 +764,7 @@ export default function App() {
     }
   };
 
-  // Gestione Inventario Totale del Format (Locale + Cloud)
+  // Gestione Inventario Totale del Format (Locale + Cloud + Fatture Amazon)
   const handleConfirmWorkshopInventory = async (workshop: WorkshopCard) => {
     const merged = mergeConfirmedMaterialsIntoInventory(
       inventory,
@@ -728,6 +781,73 @@ export default function App() {
     }
   };
 
+  const handleUpdateInventoryItem = async (updatedItem: InventoryItem) => {
+    setInventory((prev) =>
+      prev.map((it) => (it.id === updatedItem.id ? updatedItem : it))
+    );
+    if (user) {
+      try {
+        await saveInventoryItemToCloud(updatedItem, user);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  };
+
+  const handleImportAmazonInvoice = async (payload: {
+    supplier: string;
+    invoiceNumber: string;
+    invoiceDate: string;
+    items: ExtractedInvoiceLineItem[];
+    workshopTitle: string;
+    workshopId: string;
+  }) => {
+    const mergedInv = mergeInvoiceItemsIntoInventory(
+      inventory,
+      payload.items,
+      `${payload.workshopTitle} (${payload.invoiceNumber})`
+    );
+    setInventory(mergedInv);
+
+    // Calcola il totale della fattura Amazon e crea automaticamente il giustificativo di spesa per il Rimborso Spese Associativo
+    const invoiceTotal = payload.items.reduce(
+      (sum, it) =>
+        it.selected === false
+          ? sum
+          : sum + Math.max(0, Number(it.unitCost) || 0) * Math.max(1, Number(it.packsOrdered) || 1),
+      0
+    );
+
+    const autoVoucher: ExpenseVoucher = {
+      id: `vch-amz-${Date.now()}`,
+      voucherDate: payload.invoiceDate || new Date().toISOString().slice(0, 10),
+      invoiceNumber: payload.invoiceNumber || `AMZ-${Date.now().toString().slice(-5)}`,
+      category: 'amazon-invoice',
+      description: `Fattura Amazon (${payload.items.length} articoli): ${payload.items
+        .map((i) => i.name)
+        .slice(0, 3)
+        .join(', ')}`,
+      amount: Number(invoiceTotal.toFixed(2)),
+      paidBy: 'personal-advance',
+      reimbursementStatus: 'pending',
+      workshopId: payload.workshopId,
+      partnerId: activeWorkshop.partnerId || '',
+      kilometers: 0,
+      kmRate: 0,
+      notes: payload.supplier || 'Amazon EU S.à r.l.',
+      clientUpdatedAt: Date.now(),
+    };
+
+    setVouchers((prev) => [autoVoucher, ...prev]);
+
+    if (user) {
+      for (const item of mergedInv) {
+        saveInventoryItemToCloud(item, user).catch((e) => console.error(e));
+      }
+      saveVoucherToCloud(autoVoucher, user).catch((e) => console.error(e));
+    }
+  };
+
   const handleDeleteInventoryItem = async (itemId: string) => {
     deletedIdsRef.current.add(itemId);
     setInventory((prev) => prev.filter((i) => i.id !== itemId));
@@ -738,6 +858,68 @@ export default function App() {
         console.error(e);
       }
     }
+  };
+
+  // Gestione Giustificativi Spesa / Rimborsi Associazione & Conto Economico
+  const handleSaveVoucher = async (voucherRaw: ExpenseVoucher) => {
+    const voucher: ExpenseVoucher = {
+      ...voucherRaw,
+      clientUpdatedAt: Date.now(),
+    };
+    setVouchers((prev) => {
+      const exists = prev.some((v) => v.id === voucher.id);
+      return exists
+        ? prev.map((v) => (v.id === voucher.id ? voucher : v))
+        : [voucher, ...prev];
+    });
+    if (user) {
+      try {
+        await saveVoucherToCloud(voucher, user);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  };
+
+  const handleDeleteVoucher = async (voucherId: string) => {
+    deletedIdsRef.current.add(voucherId);
+    setVouchers((prev) => prev.filter((v) => v.id !== voucherId));
+    if (user) {
+      try {
+        await deleteVoucherFromCloud(voucherId);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  };
+
+  const handleUpdateAccountingRecord = (
+    workshopId: string,
+    patch: Partial<WorkshopAccountingRecord>
+  ) => {
+    setAccountingMap((prev) => {
+      const targetWs = workshops.find((w) => w.id === workshopId);
+      const targetPartner = partners.find((p) => p.id === targetWs?.partnerId);
+      const existing: WorkshopAccountingRecord = prev[workshopId] || {
+        workshopId,
+        actualPax: targetWs?.targetPax ?? 20,
+        collectionMethod:
+          targetPartner?.bureaucracyMode === 'partner-cashdesk-rebill'
+            ? 'partner-cashdesk'
+            : targetPartner?.bureaucracyMode === 'split-checkout'
+            ? 'split-checkout'
+            : 'association-direct',
+        partnerPayoutStatus: 'pending',
+        accountingNotes: '',
+      };
+      return {
+        ...prev,
+        [workshopId]: {
+          ...existing,
+          ...patch,
+        },
+      };
+    });
   };
 
   // Sincronizzazione Google Calendar
@@ -946,13 +1128,14 @@ export default function App() {
           Fatti a mano
         </a>
 
-        {/* Zona 2: 2 Navigation Links (Lab Manager ERP & Builder Grafico) */}
+        {/* Zona 2: 3 Navigation Links (Lab Manager ERP · Amministrazione · Builder Grafico) */}
         <nav
           aria-label="Navigazione moduli ERP"
           className="flex items-center gap-6 text-sm font-medium text-[#1A2B4C]/80 overflow-x-auto"
         >
           <button
             type="button"
+            data-testid="nav-tab-lab-manager"
             onClick={() => setActiveTab('lab-manager')}
             className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
               activeTab === 'lab-manager'
@@ -965,6 +1148,20 @@ export default function App() {
 
           <button
             type="button"
+            data-testid="nav-tab-administration"
+            onClick={() => setActiveTab('administration')}
+            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
+              activeTab === 'administration'
+                ? 'border-[#B85B43] text-[#1A2B4C] font-semibold'
+                : 'border-transparent hover:text-[#1A2B4C]'
+            }`}
+          >
+            Amministrazione
+          </button>
+
+          <button
+            type="button"
+            data-testid="nav-tab-graphic-builder"
             onClick={() => setActiveTab('graphic-builder')}
             className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
               activeTab === 'graphic-builder'
@@ -1059,11 +1256,26 @@ export default function App() {
             onDeletePartner={handleDeletePartner}
             inventory={inventory}
             onConfirmWorkshopInventory={handleConfirmWorkshopInventory}
+            onUpdateInventoryItem={handleUpdateInventoryItem}
+            onImportAmazonInvoice={handleImportAmazonInvoice}
             onDeleteInventoryItem={handleDeleteInventoryItem}
             onSyncGoogleCalendar={handleSyncGoogleCalendar}
             onSaveWorkshopCloud={handleSaveWorkshopCloud}
             isSavingCloud={isSavingCloud}
             lastSavedLabel={lastSavedLabel}
+          />
+        )}
+
+        {activeTab === 'administration' && (
+          <AdministrationTab
+            workshops={workshops}
+            partners={partners}
+            onSavePartner={handleSavePartner}
+            vouchers={vouchers}
+            onSaveVoucher={handleSaveVoucher}
+            onDeleteVoucher={handleDeleteVoucher}
+            accountingMap={accountingMap}
+            onUpdateAccountingRecord={handleUpdateAccountingRecord}
           />
         )}
 

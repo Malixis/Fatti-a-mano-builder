@@ -1,9 +1,13 @@
 import {
+  ExpenseVoucher,
+  ExtractedInvoiceLineItem,
+  FormatBalanceSheetMetrics,
   InventoryItem,
   MaterialItem,
   PartnerProfile,
   RoiMetrics,
   VectorElement,
+  WorkshopAccountingRecord,
   WorkshopCard,
   WorkshopPosterDesign,
 } from '../types/erp';
@@ -403,4 +407,175 @@ export function sanitizeDesignTemplateForFirestore(
     ownerId: ownerId.slice(0, 128),
   };
 }
+
+export function sanitizeExpenseVoucherForFirestore(
+  voucher: ExpenseVoucher,
+  ownerId: string
+) {
+  return {
+    description: (voucher.description || 'Spesa Associazione').trim().slice(0, 200),
+    voucherDate: String(voucher.voucherDate || new Date().toISOString().slice(0, 10)).slice(0, 20),
+    category: String(voucher.category || 'amazon-invoice').slice(0, 40),
+    amount: Math.min(1000000, Math.max(0, round2(Number(voucher.amount) || 0))),
+    paidBy: (voucher.paidBy === 'association-direct' ? 'association-direct' : 'personal-advance').slice(0, 40),
+    reimbursementStatus: (voucher.reimbursementStatus || 'pending').slice(0, 40),
+    invoiceNumber: String(voucher.invoiceNumber || '').slice(0, 80),
+    workshopId: String(voucher.workshopId || '').slice(0, 128),
+    partnerId: String(voucher.partnerId || '').slice(0, 128),
+    kilometers: Math.min(50000, Math.max(0, Number(voucher.kilometers) || 0)),
+    kmRate: Math.min(50, Math.max(0, Number(voucher.kmRate) || 0)),
+    notes: String(voucher.notes || '').slice(0, 1000),
+    clientUpdatedAt: Math.max(0, Number(voucher.clientUpdatedAt) || Date.now()),
+    ownerId: ownerId.slice(0, 128),
+  };
+}
+
+/**
+ * Unisce le righe estratte e confermate da una fattura Amazon nell'Inventario Totale del Format.
+ */
+export function mergeInvoiceItemsIntoInventory(
+  currentInventory: InventoryItem[],
+  invoiceItems: ExtractedInvoiceLineItem[],
+  invoiceReferenceLabel: string
+): InventoryItem[] {
+  const map = new Map<string, InventoryItem>();
+  for (const inv of currentInventory) {
+    map.set(inv.name.trim().toLowerCase(), { ...inv });
+  }
+
+  for (const item of invoiceItems) {
+    if (!item.selected) continue;
+    const key = item.name.trim().toLowerCase();
+    if (!key) continue;
+
+    const packs = Math.max(1, Math.round(Number(item.packsOrdered) || 1));
+    const piecesPerPack = Math.max(1, Math.round(Number(item.piecesPerPack) || 1));
+    const addedPieces = packs * piecesPerPack;
+    const unitCost = Math.max(0, round2(Number(item.unitCost) || 0));
+
+    const existing = map.get(key);
+    if (existing) {
+      map.set(key, {
+        ...existing,
+        costType: item.costType,
+        unitCost,
+        packsOrderedTotal: existing.packsOrderedTotal + packs,
+        piecesPerPack,
+        totalPiecesOrdered: existing.totalPiecesOrdered + addedPieces,
+        piecesAvailable: existing.piecesAvailable + addedPieces,
+        lastWorkshopTitle: invoiceReferenceLabel || 'Fattura Amazon',
+        updatedAt: new Date().toISOString().slice(0, 10),
+        clientUpdatedAt: Date.now(),
+      });
+    } else {
+      map.set(key, {
+        id: `inv-amz-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name: item.name.trim(),
+        costType: item.costType,
+        unitCost,
+        packsOrderedTotal: packs,
+        piecesPerPack,
+        totalPiecesOrdered: addedPieces,
+        piecesUsedTotal: 0,
+        piecesAvailable: addedPieces,
+        lastWorkshopTitle: invoiceReferenceLabel || 'Fattura Amazon',
+        updatedAt: new Date().toISOString().slice(0, 10),
+        clientUpdatedAt: Date.now(),
+      });
+    }
+  }
+
+  return Array.from(map.values());
+}
+
+/**
+ * Calcola il Bilancio d'Esercizio del Format e il Rendiconto Cassa Associazione vs Rimborsi Spese Personali.
+ */
+export function calculateFormatBalanceSheet(
+  workshops: WorkshopCard[],
+  vouchers: ExpenseVoucher[],
+  accountingMap: Record<string, WorkshopAccountingRecord>
+): FormatBalanceSheetMetrics {
+  let totalGrossRevenue = 0;
+  let totalPartnerVenueShare = 0;
+  let totalWorkshopMaterialsCost = 0;
+  let pendingPartnerSettlementsTotal = 0;
+
+  for (const ws of workshops) {
+    const rec = accountingMap[ws.id];
+    const effectivePax =
+      rec && Number.isFinite(rec.actualPax) && rec.actualPax > 0
+        ? rec.actualPax
+        : ws.targetPax;
+
+    const roi = calculateWorkshopRoi(
+      ws.materials,
+      ws.ticketPrice,
+      ws.venueFeePerPax,
+      effectivePax,
+      ws.calculatorLinked ?? true
+    );
+
+    totalGrossRevenue += roi.grossRevenue;
+    totalPartnerVenueShare += roi.totalVenueCost;
+    totalWorkshopMaterialsCost += roi.fixedCostsTotal + roi.totalVariableMaterialsCost;
+
+    if (!rec || rec.partnerPayoutStatus === 'pending') {
+      pendingPartnerSettlementsTotal += roi.totalVenueCost;
+    }
+  }
+
+  const totalAssociationNetRevenue = Math.max(0, totalGrossRevenue - totalPartnerVenueShare);
+
+  let totalVouchersDocumented = 0;
+  let totalPersonalAdvancesPending = 0;
+  let totalPersonalAdvancesReimbursed = 0;
+  let totalAssociationDirectExpenses = 0;
+
+  for (const v of vouchers) {
+    const amt = Math.max(0, Number(v.amount) || 0);
+    totalVouchersDocumented += amt;
+
+    if (v.paidBy === 'personal-advance') {
+      if (v.reimbursementStatus === 'reimbursed') {
+        totalPersonalAdvancesReimbursed += amt;
+      } else if (v.reimbursementStatus === 'pending') {
+        totalPersonalAdvancesPending += amt;
+      }
+    } else if (v.paidBy === 'association-direct') {
+      totalAssociationDirectExpenses += amt;
+    }
+  }
+
+  const associationCashAvailableBeforeReimbursements =
+    totalAssociationNetRevenue - totalAssociationDirectExpenses;
+
+  const associationCashResidualAfterReimbursements =
+    associationCashAvailableBeforeReimbursements - totalPersonalAdvancesReimbursed;
+
+  const maxClaimableReimbursementNow = Math.max(
+    0,
+    Math.min(totalPersonalAdvancesPending, associationCashResidualAfterReimbursements)
+  );
+
+  return {
+    totalGrossRevenue: round2(totalGrossRevenue),
+    totalPartnerVenueShare: round2(totalPartnerVenueShare),
+    totalAssociationNetRevenue: round2(totalAssociationNetRevenue),
+    totalWorkshopMaterialsCost: round2(totalWorkshopMaterialsCost),
+    totalVouchersDocumented: round2(totalVouchersDocumented),
+    totalPersonalAdvancesPending: round2(totalPersonalAdvancesPending),
+    totalPersonalAdvancesReimbursed: round2(totalPersonalAdvancesReimbursed),
+    totalAssociationDirectExpenses: round2(totalAssociationDirectExpenses),
+    associationCashAvailableBeforeReimbursements: round2(
+      associationCashAvailableBeforeReimbursements
+    ),
+    associationCashResidualAfterReimbursements: round2(
+      associationCashResidualAfterReimbursements
+    ),
+    maxClaimableReimbursementNow: round2(maxClaimableReimbursementNow),
+    pendingPartnerSettlementsTotal: round2(pendingPartnerSettlementsTotal),
+  };
+}
+
 

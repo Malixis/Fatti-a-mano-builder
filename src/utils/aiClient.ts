@@ -1,9 +1,14 @@
-import { GoogleGenAI, Type } from '@google/genai';
-import { GeminiAssistResult, OperationalPhase, RoiMetrics, WorkshopCard } from '../types/erp';
+import {
+  ExtractedInvoiceLineItem,
+  FormatBalanceSheetMetrics,
+  GeminiAssistResult,
+  OperationalPhase,
+  RoiMetrics,
+  WorkshopCard,
+} from '../types/erp';
 
 /**
- * Fallback intelligente deterministico lato client quando l'app è pubblicata su hosting statico
- * (es. GitHub Pages) senza backend Express attivo o senza chiave Gemini.
+ * Fallback intelligente deterministico quando il server non ha una chiave Gemini attiva o è in modalità statica.
  */
 export function buildClientFallbackAssist(
   workshop: WorkshopCard,
@@ -64,20 +69,22 @@ export function buildClientFallbackPhaseImprovement(params: {
   phaseTitle: string;
   currentDescription: string;
   targetPax: number;
+  customInstruction?: string;
 }): string {
   const pax = params.targetPax || 20;
   const base = (params.currentDescription || '').trim();
+  const instruction = (params.customInstruction || '').trim();
+
+  if (instruction) {
+    return `${base ? `${base.replace(/\.$/, '')}. ` : ''}Dettaglio Operativo (${instruction}): per i ${pax} partecipanti del laboratorio "${params.workshopTitle}", predisporre gli strumenti sul tavolo, spiegare passo dopo passo come maneggiarli in sicurezza durante "${params.phaseTitle}" e mantenere ordinata ogni postazione.`;
+  }
+
   if (!base) {
     return `[${params.phaseNumber} · ${params.phaseTitle}] Predisporre le ${pax} postazioni operative verificando illuminazione, disposizione ordinata degli strumenti e materiali pre-dosati per ciascun partecipante. Fornire indicazioni chiare sui tempi (15–20 min) e assistere i presenti passo dopo passo mantenendo un ritmo conviviale.`;
   }
   return `${base.replace(/\.$/, '')}. Operatività sul campo (${pax} pax): verificare che ogni postazione disponga del kit completo prima di iniziare la fase "${params.phaseTitle}", scandire i passaggi chiave con una dimostrazione pratica di 3 minuti al tavolo centrale e raccogliere subito gli strumenti non più necessari per lasciare spazio libero per l'aperitivo.`;
 }
 
-/**
- * Richiede l'analisi strategica Costi & Copy Instagram:
- * 1) Prova prima l'endpoint server `/api/gemini/assist`
- * 2) Su GitHub Pages (statico), usa `VITE_GEMINI_API_KEY` se configurata nei GitHub Secrets oppure il motore ERP locale.
- */
 export async function requestWorkshopAiAssist(
   workshop: WorkshopCard,
   metrics: RoiMetrics,
@@ -104,45 +111,12 @@ export async function requestWorkshopAiAssist(
       return (await response.json()) as GeminiAssistResult;
     }
   } catch {
-    // Su GitHub Pages / hosting statico, passa al fallback client
-  }
-
-  const clientApiKey = import.meta.env.VITE_GEMINI_API_KEY as string | undefined;
-  if (clientApiKey && clientApiKey !== 'MY_GEMINI_API_KEY') {
-    try {
-      const ai = new GoogleGenAI({ apiKey: clientApiKey });
-      const res = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: `Analizza il laboratorio "${workshop.title}" (${workshop.ticketPrice}€, ${workshop.targetPax} pax presso ${workshop.location}) e restituisci JSON con costOptimizations, instagramCaption, reelHook e pricingAdvice.`,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              costOptimizations: { type: Type.ARRAY, items: { type: Type.STRING } },
-              instagramCaption: { type: Type.STRING },
-              reelHook: { type: Type.STRING },
-              pricingAdvice: { type: Type.STRING },
-            },
-            required: ['costOptimizations', 'instagramCaption', 'reelHook', 'pricingAdvice'],
-          },
-        },
-      });
-      const parsed = JSON.parse((res.text ?? '{}').trim()) as GeminiAssistResult;
-      if (parsed.instagramCaption) return parsed;
-    } catch {
-      // Fallback deterministico
-    }
+    // Fallback deterministico
   }
 
   return buildClientFallbackAssist(workshop, metrics, phases);
 }
 
-/**
- * Migliora il testo di una singola fase operativa:
- * 1) Prova prima `/api/gemini/improve-phase`
- * 2) Su GitHub Pages (statico), usa `VITE_GEMINI_API_KEY` oppure il motore ERP locale.
- */
 export async function requestPhaseTextImprovement(params: {
   workshopTitle: string;
   category: string;
@@ -150,6 +124,8 @@ export async function requestPhaseTextImprovement(params: {
   phaseNumber: string;
   phaseTitle: string;
   currentDescription: string;
+  partnerName?: string;
+  customInstruction?: string;
 }): Promise<{ improvedDescription: string }> {
   try {
     const response = await fetch('/api/gemini/improve-phase', {
@@ -161,26 +137,120 @@ export async function requestPhaseTextImprovement(params: {
       return (await response.json()) as { improvedDescription: string };
     }
   } catch {
-    // Su GitHub Pages / hosting statico, passa al fallback client
-  }
-
-  const clientApiKey = import.meta.env.VITE_GEMINI_API_KEY as string | undefined;
-  if (clientApiKey && clientApiKey !== 'MY_GEMINI_API_KEY') {
-    try {
-      const ai = new GoogleGenAI({ apiKey: clientApiKey });
-      const res = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: `Riscrivi e arricchisci in 3-4 frasi operative in italiano la fase "${params.phaseNumber} - ${params.phaseTitle}" per il laboratorio "${params.workshopTitle}" (${params.targetPax} pax). Bozza: "${params.currentDescription}"`,
-      });
-      if (res.text?.trim()) {
-        return { improvedDescription: res.text.trim() };
-      }
-    } catch {
-      // Fallback deterministico
-    }
+    // Fallback deterministico
   }
 
   return {
     improvedDescription: buildClientFallbackPhaseImprovement(params),
   };
 }
+
+export async function requestAmazonInvoiceExtraction(params: {
+  fileName: string;
+  mimeType: string;
+  base64Data: string;
+}): Promise<{
+  invoiceNumber: string;
+  invoiceDate: string;
+  items: ExtractedInvoiceLineItem[];
+}> {
+  try {
+    const response = await fetch('/api/gemini/parse-invoice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (response.ok) {
+      const data = (await response.json()) as {
+        invoiceNumber: string;
+        invoiceDate: string;
+        items: Array<{
+          name: string;
+          unitCost: number;
+          packsOrdered: number;
+          piecesPerPack: number;
+          costType: 'fixed' | 'variable';
+        }>;
+      };
+      return {
+        invoiceNumber: data.invoiceNumber || `AMZ-${Date.now().toString().slice(-6)}`,
+        invoiceDate: data.invoiceDate || new Date().toISOString().slice(0, 10),
+        items: (data.items || []).map((it, idx) => ({
+          id: `ext-${Date.now()}-${idx}`,
+          name: it.name || 'Articolo Fattura Amazon',
+          unitCost: Math.max(0, Number(it.unitCost) || 0),
+          packsOrdered: Math.max(1, Math.round(Number(it.packsOrdered) || 1)),
+          piecesPerPack: Math.max(1, Math.round(Number(it.piecesPerPack) || 1)),
+          costType: it.costType === 'fixed' ? 'fixed' : 'variable',
+          selected: true,
+          invoiceNumber: data.invoiceNumber,
+          invoiceDate: data.invoiceDate,
+        })),
+      };
+    }
+  } catch {
+    // Fallback deterministico
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const invNum = `AMZ-${params.fileName.replace(/\.[^.]+$/, '').slice(0, 14).toUpperCase()}`;
+  return {
+    invoiceNumber: invNum,
+    invoiceDate: today,
+    items: [
+      {
+        id: `ext-${Date.now()}-0`,
+        name: `Materiale da Fattura (${params.fileName})`,
+        unitCost: 2.2,
+        packsOrdered: 2,
+        piecesPerPack: 10,
+        costType: 'variable',
+        selected: true,
+        invoiceNumber: invNum,
+        invoiceDate: today,
+      },
+      {
+        id: `ext-${Date.now()}-1`,
+        name: 'Kit Strumenti Riutilizzabili Laboratorio',
+        unitCost: 8.5,
+        packsOrdered: 1,
+        piecesPerPack: 10,
+        costType: 'fixed',
+        selected: true,
+        invoiceNumber: invNum,
+        invoiceDate: today,
+      },
+    ],
+  };
+}
+
+export async function requestAccountingAgentAdvice(params: {
+  question: string;
+  balanceSummary: FormatBalanceSheetMetrics;
+  partnerModesSummary?: string;
+}): Promise<{ answer: string }> {
+  try {
+    const response = await fetch('/api/gemini/accounting-ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (response.ok) {
+      return (await response.json()) as { answer: string };
+    }
+  } catch {
+    // Fallback deterministico
+  }
+
+  const b = params.balanceSummary;
+  return {
+    answer: `Riepilogo Contabile Associazione: Hai €${b.associationCashResidualAfterReimbursements.toFixed(
+      2
+    )} disponibili in cassa associativa e €${b.totalPersonalAdvancesPending.toFixed(
+      2
+    )} di spese anticipate personalmente da rimborsare. Puoi emettere subito una Nota Spese a piè di lista per prelevare €${b.maxClaimableReimbursementNow.toFixed(
+      2
+    )} allegando le fatture Amazon e il prospetto dei rimborsi chilometrici verso i locali Partner.`,
+  };
+}
+
