@@ -470,6 +470,10 @@ export function subscribeUserPartners(
           commercialDealNotes: d.commercialDealNotes,
           defaultVenueFee: Number(d.defaultVenueFee) || 0,
           logoText: d.logoText || 'PARTNER',
+          logoImageUrl:
+            typeof d.logoImageUrl === 'string' && d.logoImageUrl
+              ? d.logoImageUrl
+              : undefined,
           logoShape: d.logoShape || 'circle-seal',
           fontStyle: d.fontStyle || 'editorial-serif',
           palette: Array.isArray(d.palette) ? d.palette : ['#1A2B4C', '#B85B43', '#4A6B53'],
@@ -564,10 +568,22 @@ function parseVectorElementFromCloud(raw: Record<string, unknown>): VectorElemen
     visible: Boolean(raw.visible ?? true),
     locked: Boolean(raw.locked ?? false),
     pathData: String(raw.pathData || ''),
+    imageUrl: typeof raw.imageUrl === 'string' && raw.imageUrl ? raw.imageUrl : undefined,
+    closedPath: typeof raw.closedPath === 'boolean' ? raw.closedPath : true,
     controlPoints: Array.isArray(raw.controlPoints)
       ? raw.controlPoints.map((pt: Record<string, unknown>) => ({
           x: Number(pt.x) || 0,
           y: Number(pt.y) || 0,
+        }))
+      : undefined,
+    bezierNodes: Array.isArray(raw.bezierNodes)
+      ? raw.bezierNodes.map((n: Record<string, unknown>) => ({
+          x: Number(n.x) || 0,
+          y: Number(n.y) || 0,
+          inX: Number(n.inX ?? n.x) || 0,
+          inY: Number(n.inY ?? n.y) || 0,
+          outX: Number(n.outX ?? n.x) || 0,
+          outY: Number(n.outY ?? n.y) || 0,
         }))
       : undefined,
     subPaths: Array.isArray(raw.subPaths)

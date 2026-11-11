@@ -205,6 +205,12 @@
           "minLength": 1,
           "maxLength": 40
         },
+        "logoImageUrl": {
+          "type": "string",
+          "description": "Immagine logo del partner in formato Data URL PNG/SVG/WebP",
+          "minLength": 0,
+          "maxLength": 350000
+        },
         "logoShape": {
           "type": "string",
           "description": "Forma grafica del badge/logo vettoriale",
@@ -251,6 +257,7 @@
         "commercialDealNotes",
         "defaultVenueFee",
         "logoText",
+        "logoImageUrl",
         "logoShape",
         "fontStyle",
         "palette",

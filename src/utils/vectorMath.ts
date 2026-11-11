@@ -1,5 +1,8 @@
 import getStroke from 'perfect-freehand';
 import {
+  AlignOperationId,
+  AlignTargetMode,
+  BezierNode,
   BlobDrawMode,
   PartnerProfile,
   PointerSample,
@@ -419,6 +422,462 @@ export function rebuildPathFromControlPoints(
 }
 
 /**
+ * Costruisce un tracciato SVG cubico di Bézier (`M x0 y0 C outX0 outY0, inX1 inY1, x1 y1 ...`)
+ * a partire dai punti di ancoraggio e dalle relative maniglie direzionali (`inX/inY` e `outX/outY`),
+ * replicando fedelmente lo strumento Penna (P) di Adobe Illustrator.
+ */
+export function buildBezierPathFromNodes(
+  nodes: BezierNode[],
+  closed = true
+): {
+  pathData: string;
+  controlPoints: Array<{ x: number; y: number }>;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  if (!nodes || nodes.length === 0) {
+    return {
+      pathData: '',
+      controlPoints: [],
+      x: 540,
+      y: 675,
+      width: 120,
+      height: 120,
+    };
+  }
+
+  const controlPoints = nodes.map((n) => ({ x: Math.round(n.x), y: Math.round(n.y) }));
+  if (nodes.length === 1) {
+    const n0 = nodes[0];
+    return {
+      pathData: `M ${n0.x.toFixed(1)} ${n0.y.toFixed(1)}`,
+      controlPoints,
+      x: Math.round(n0.x),
+      y: Math.round(n0.y),
+      width: 60,
+      height: 60,
+    };
+  }
+
+  let d = `M ${nodes[0].x.toFixed(1)} ${nodes[0].y.toFixed(1)}`;
+  const segmentCount = closed ? nodes.length : nodes.length - 1;
+
+  for (let i = 0; i < segmentCount; i++) {
+    const curr = nodes[i];
+    const next = nodes[(i + 1) % nodes.length];
+    const hasCurrHandle =
+      Math.hypot(curr.outX - curr.x, curr.outY - curr.y) > 0.5;
+    const hasNextHandle =
+      Math.hypot(next.inX - next.x, next.inY - next.y) > 0.5;
+
+    if (!hasCurrHandle && !hasNextHandle) {
+      d += ` L ${next.x.toFixed(1)} ${next.y.toFixed(1)}`;
+    } else {
+      d += ` C ${curr.outX.toFixed(1)} ${curr.outY.toFixed(1)}, ${next.inX.toFixed(1)} ${next.inY.toFixed(1)}, ${next.x.toFixed(1)} ${next.y.toFixed(1)}`;
+    }
+  }
+
+  if (closed && nodes.length >= 2) {
+    d += ' Z';
+  }
+
+  // Calcola il bounding box includendo sia le ancore sia le estensioni delle maniglie
+  const samplePoints: Array<{ x: number; y: number }> = [];
+  for (const n of nodes) {
+    samplePoints.push({ x: n.x, y: n.y });
+    samplePoints.push({ x: (n.x + n.inX) / 2, y: (n.y + n.inY) / 2 });
+    samplePoints.push({ x: (n.x + n.outX) / 2, y: (n.y + n.outY) / 2 });
+  }
+  const bbox = computePointsBoundingBox(samplePoints);
+
+  return {
+    pathData: d,
+    controlPoints,
+    ...bbox,
+  };
+}
+
+/**
+ * Trasla un elemento vettoriale di (dx, dy) aggiornando coerentemente sia il suo centro (x, y)
+ * sia eventuali nodi di controllo (`controlPoints`), nodi Bézier (`bezierNodes`) e tracciati SVG (`pathData`).
+ */
+export function translateVectorElementByDelta(
+  el: VectorElement,
+  dx: number,
+  dy: number
+): VectorElement {
+  if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return el;
+
+  const nextX = Math.round(el.x + dx);
+  const nextY = Math.round(el.y + dy);
+
+  if (Array.isArray(el.bezierNodes) && el.bezierNodes.length > 0) {
+    const movedNodes = el.bezierNodes.map((n) => ({
+      x: Math.round(n.x + dx),
+      y: Math.round(n.y + dy),
+      inX: Math.round(n.inX + dx),
+      inY: Math.round(n.inY + dy),
+      outX: Math.round(n.outX + dx),
+      outY: Math.round(n.outY + dy),
+    }));
+    const rebuilt = buildBezierPathFromNodes(
+      movedNodes,
+      el.closedPath !== false
+    );
+    return {
+      ...el,
+      x: rebuilt.x,
+      y: rebuilt.y,
+      width: rebuilt.width,
+      height: rebuilt.height,
+      bezierNodes: movedNodes,
+      controlPoints: rebuilt.controlPoints,
+      pathData: rebuilt.pathData,
+    };
+  }
+
+  if (Array.isArray(el.controlPoints) && el.controlPoints.length > 0) {
+    const movedPts = el.controlPoints.map((pt) => ({
+      x: Math.round(pt.x + dx),
+      y: Math.round(pt.y + dy),
+    }));
+    if (el.type === 'shape' && el.shapeKind) {
+      const rebuiltShape = generateShapePrimitivePath(
+        el.shapeKind,
+        nextX,
+        nextY,
+        el.width,
+        el.height,
+        el.cornerRadius || 0
+      );
+      return {
+        ...el,
+        x: nextX,
+        y: nextY,
+        controlPoints: rebuiltShape.controlPoints,
+        pathData: rebuiltShape.pathData,
+      };
+    }
+    const rebuilt = rebuildPathFromControlPoints(
+      movedPts,
+      el.type !== 'pen-path' || el.closedPath !== false
+    );
+    return {
+      ...el,
+      x: rebuilt.x,
+      y: rebuilt.y,
+      width: rebuilt.width,
+      height: rebuilt.height,
+      controlPoints: movedPts,
+      pathData: rebuilt.pathData,
+    };
+  }
+
+  if (el.type === 'blob') {
+    return {
+      ...el,
+      x: nextX,
+      y: nextY,
+      pathData: generateOrganicBlobPath(
+        nextX,
+        nextY,
+        el.width / 2,
+        el.height / 2,
+        el.id.length + 1.7,
+        10
+      ),
+    };
+  }
+
+  if (el.type === 'checkerboard') {
+    return {
+      ...el,
+      x: nextX,
+      y: nextY,
+      pathData: generateWavyCheckerboardPath(
+        nextX - el.width / 2,
+        nextY - el.height / 2,
+        el.width,
+        el.height,
+        5,
+        6,
+        12,
+        2.1
+      ),
+    };
+  }
+
+  if (el.type === 'stamp' && el.stampKind) {
+    const stamp = generateBrandStamp(
+      el.stampKind,
+      nextX,
+      nextY,
+      Math.max(el.width, el.height)
+    );
+    return {
+      ...el,
+      x: nextX,
+      y: nextY,
+      pathData: stamp.pathData,
+      subPaths: stamp.subPaths,
+    };
+  }
+
+  if (el.type === 'textured-text') {
+    const meta = generateTextVectorBackdropPath(
+      el.textContent || 'Fatti a mano',
+      nextX,
+      nextY,
+      el.fontSize || 42,
+      el.textureType
+    );
+    return {
+      ...el,
+      x: nextX,
+      y: nextY,
+      pathData: meta.pathData,
+    };
+  }
+
+  return {
+    ...el,
+    x: nextX,
+    y: nextY,
+  };
+}
+
+/**
+ * Motore di Allineamento e Distribuzione identico al pannello "Allinea" di Adobe Illustrator:
+ * - Allinea oggetti (7 azioni): sinistra, centro orizzontale, destra, centro assoluto (croce), alto, centro verticale, basso
+ * - Distribuisci oggetti (6 azioni): alto, centro verticale, basso, sinistra, centro orizzontale, destra
+ * - Distribuisci spaziatura (2 azioni): verticale e orizzontale con spaziatura esplicita (o automatica se 0)
+ * - Allinea a: 'artboard' (Tavola da disegno), 'selection' (Selezione), 'key-object' (Oggetto chiave)
+ */
+export function alignAndDistributeElements(
+  elements: VectorElement[],
+  selectedIds: string[],
+  operation: AlignOperationId,
+  targetMode: AlignTargetMode,
+  canvasWidth: number,
+  canvasHeight: number,
+  keyObjectId?: string | null,
+  spacingPx = 0
+): VectorElement[] {
+  const selectedSet = new Set(selectedIds);
+  const targets = elements.filter((el) => selectedSet.has(el.id) && !el.locked);
+  if (targets.length === 0) return elements;
+
+  const getBounds = (el: VectorElement) => {
+    const halfW = (el.width * (el.scale || 1)) / 2;
+    const halfH = (el.height * (el.scale || 1)) / 2;
+    return {
+      left: el.x - halfW,
+      right: el.x + halfW,
+      top: el.y - halfH,
+      bottom: el.y + halfH,
+      centerX: el.x,
+      centerY: el.y,
+      width: halfW * 2,
+      height: halfH * 2,
+    };
+  };
+
+  // Determina il rettangolo di riferimento (Tavola da disegno, Selezione, o Oggetto Chiave)
+  const effectiveMode: AlignTargetMode =
+    targets.length === 1 && targetMode === 'selection' ? 'artboard' : targetMode;
+
+  const keyObj =
+    effectiveMode === 'key-object'
+      ? targets.find((t) => t.id === keyObjectId) || targets[0]
+      : null;
+
+  let refLeft = 0;
+  let refRight = canvasWidth;
+  let refTop = 0;
+  let refBottom = canvasHeight;
+
+  if (effectiveMode === 'key-object' && keyObj) {
+    const kb = getBounds(keyObj);
+    refLeft = kb.left;
+    refRight = kb.right;
+    refTop = kb.top;
+    refBottom = kb.bottom;
+  } else if (effectiveMode === 'selection' && targets.length > 1) {
+    const allBounds = targets.map(getBounds);
+    refLeft = Math.min(...allBounds.map((b) => b.left));
+    refRight = Math.max(...allBounds.map((b) => b.right));
+    refTop = Math.min(...allBounds.map((b) => b.top));
+    refBottom = Math.max(...allBounds.map((b) => b.bottom));
+  }
+
+  const refCenterX = (refLeft + refRight) / 2;
+  const refCenterY = (refTop + refBottom) / 2;
+
+  const deltaById = new Map<string, { dx: number; dy: number }>();
+
+  // 1. ALLINEA OGGETTI (7 funzioni)
+  if (operation.startsWith('align-')) {
+    for (const el of targets) {
+      if (effectiveMode === 'key-object' && keyObj && el.id === keyObj.id) {
+        deltaById.set(el.id, { dx: 0, dy: 0 });
+        continue;
+      }
+      const b = getBounds(el);
+      let dx = 0;
+      let dy = 0;
+      if (operation === 'align-left') dx = refLeft - b.left;
+      else if (operation === 'align-center-h') dx = refCenterX - b.centerX;
+      else if (operation === 'align-right') dx = refRight - b.right;
+      else if (operation === 'align-top') dy = refTop - b.top;
+      else if (operation === 'align-center-v') dy = refCenterY - b.centerY;
+      else if (operation === 'align-bottom') dy = refBottom - b.bottom;
+      else if (operation === 'align-center-both') {
+        dx = refCenterX - b.centerX;
+        dy = refCenterY - b.centerY;
+      }
+      deltaById.set(el.id, { dx, dy });
+    }
+  }
+
+  // 2. DISTRIBUISCI OGGETTI (6 funzioni)
+  else if (
+    operation === 'distribute-top' ||
+    operation === 'distribute-center-v' ||
+    operation === 'distribute-bottom' ||
+    operation === 'distribute-left' ||
+    operation === 'distribute-center-h' ||
+    operation === 'distribute-right'
+  ) {
+    const isVertical =
+      operation === 'distribute-top' ||
+      operation === 'distribute-center-v' ||
+      operation === 'distribute-bottom';
+
+    const metric = (el: VectorElement) => {
+      const b = getBounds(el);
+      if (operation === 'distribute-top') return b.top;
+      if (operation === 'distribute-center-v') return b.centerY;
+      if (operation === 'distribute-bottom') return b.bottom;
+      if (operation === 'distribute-left') return b.left;
+      if (operation === 'distribute-center-h') return b.centerX;
+      return b.right;
+    };
+
+    const sorted = [...targets].sort((a, b) => metric(a) - metric(b));
+    if (sorted.length >= 2) {
+      let startVal = metric(sorted[0]);
+      let endVal = metric(sorted[sorted.length - 1]);
+
+      if (effectiveMode === 'artboard') {
+        const firstB = getBounds(sorted[0]);
+        const lastB = getBounds(sorted[sorted.length - 1]);
+        if (operation === 'distribute-top') {
+          startVal = 0;
+          endVal = canvasHeight - lastB.height;
+        } else if (operation === 'distribute-center-v') {
+          startVal = firstB.height / 2;
+          endVal = canvasHeight - lastB.height / 2;
+        } else if (operation === 'distribute-bottom') {
+          startVal = firstB.height;
+          endVal = canvasHeight;
+        } else if (operation === 'distribute-left') {
+          startVal = 0;
+          endVal = canvasWidth - lastB.width;
+        } else if (operation === 'distribute-center-h') {
+          startVal = firstB.width / 2;
+          endVal = canvasWidth - lastB.width / 2;
+        } else if (operation === 'distribute-right') {
+          startVal = firstB.width;
+          endVal = canvasWidth;
+        }
+      }
+
+      const step =
+        sorted.length > 1 ? (endVal - startVal) / (sorted.length - 1) : 0;
+
+      sorted.forEach((el, idx) => {
+        const currentVal = metric(el);
+        const desiredVal = startVal + idx * step;
+        const diff = desiredVal - currentVal;
+        deltaById.set(el.id, {
+          dx: isVertical ? 0 : diff,
+          dy: isVertical ? diff : 0,
+        });
+      });
+    }
+  }
+
+  // 3. DISTRIBUISCI SPAZIATURA (Verticale / Orizzontale con valore in px/mm)
+  else if (
+    operation === 'distribute-spacing-v' ||
+    operation === 'distribute-spacing-h'
+  ) {
+    const isVertical = operation === 'distribute-spacing-v';
+    const sorted = [...targets].sort((a, b) => {
+      const ba = getBounds(a);
+      const bb = getBounds(b);
+      return isVertical ? ba.top - bb.top : ba.left - bb.left;
+    });
+
+    if (sorted.length >= 2) {
+      const boundsList = sorted.map(getBounds);
+      const totalSizes = boundsList.reduce(
+        (acc, b) => acc + (isVertical ? b.height : b.width),
+        0
+      );
+
+      const useExplicitGap =
+        effectiveMode === 'key-object' || Math.abs(spacingPx) > 0;
+
+      let gap = spacingPx;
+      if (!useExplicitGap) {
+        const spanStart =
+          effectiveMode === 'artboard'
+            ? 0
+            : isVertical
+            ? boundsList[0].top
+            : boundsList[0].left;
+        const spanEnd =
+          effectiveMode === 'artboard'
+            ? isVertical
+              ? canvasHeight
+              : canvasWidth
+            : isVertical
+            ? boundsList[boundsList.length - 1].bottom
+            : boundsList[boundsList.length - 1].right;
+        gap = (spanEnd - spanStart - totalSizes) / (sorted.length - 1);
+      }
+
+      let cursor =
+        effectiveMode === 'artboard' && !useExplicitGap
+          ? 0
+          : isVertical
+          ? boundsList[0].top
+          : boundsList[0].left;
+
+      sorted.forEach((el, idx) => {
+        const b = boundsList[idx];
+        const currentStart = isVertical ? b.top : b.left;
+        const diff = cursor - currentStart;
+        deltaById.set(el.id, {
+          dx: isVertical ? 0 : diff,
+          dy: isVertical ? diff : 0,
+        });
+        cursor += (isVertical ? b.height : b.width) + gap;
+      });
+    }
+  }
+
+  return elements.map((el) => {
+    const delta = deltaById.get(el.id);
+    if (!delta) return el;
+    return translateVectorElementByDelta(el, delta.dx, delta.dy);
+  });
+}
+
+/**
  * Genera forme geometriche vettoriali (Rettangolo/Arrotondato, Ellisse, Poligono/Esagono, Stella)
  * complete di `controlPoints` per poterle poi deformare nodo per nodo con Selezione Diretta (A).
  */
@@ -794,28 +1253,51 @@ export function buildPartnerVectorAssets(
   );
 
   const partnerElements: VectorElement[] = [
-    {
-      id: `partner-badge-${partner.id}-${Date.now()}`,
-      name: `Logo Partner: ${partner.name}`,
-      type: 'textured-text',
-      x: logoX,
-      y: logoY,
-      width: badgeMeta.width,
-      height: badgeMeta.height,
-      rotation: 0,
-      scale: 1,
-      color: '#EADDCD',
-      secondaryColor: primaryColor,
-      opacity: 0.98,
-      zIndex: 14,
-      visible: true,
-      locked: false,
-      pathData: badgeMeta.pathData,
-      textureType: 'materic-blob',
-      textContent: badgeText,
-      fontStyle: partner.fontStyle,
-      fontSize: 26,
-    },
+    partner.logoImageUrl
+      ? {
+          id: `partner-badge-${partner.id}-${Date.now()}`,
+          name: `Logo Ufficiale: ${partner.name}`,
+          type: 'image',
+          x: logoX,
+          y: logoY,
+          width: 240,
+          height: 150,
+          rotation: 0,
+          scale: 1,
+          color: primaryColor,
+          secondaryColor: secondaryColor,
+          opacity: 1,
+          zIndex: 14,
+          visible: true,
+          locked: false,
+          pathData: '',
+          imageUrl: partner.logoImageUrl,
+          textureType: 'none',
+          partnerId: partner.id,
+        }
+      : {
+          id: `partner-badge-${partner.id}-${Date.now()}`,
+          name: `Logo Partner: ${partner.name}`,
+          type: 'textured-text',
+          x: logoX,
+          y: logoY,
+          width: badgeMeta.width,
+          height: badgeMeta.height,
+          rotation: 0,
+          scale: 1,
+          color: '#EADDCD',
+          secondaryColor: primaryColor,
+          opacity: 0.98,
+          zIndex: 14,
+          visible: true,
+          locked: false,
+          pathData: badgeMeta.pathData,
+          textureType: 'materic-blob',
+          textContent: badgeText,
+          fontStyle: partner.fontStyle,
+          fontSize: 26,
+          partnerId: partner.id,
+        },
     {
       id: `partner-blob-${partner.id}-${Date.now() + 1}`,
       name: `Macchia Palette ${partner.name}`,
@@ -833,6 +1315,7 @@ export function buildPartnerVectorAssets(
       locked: false,
       pathData: partnerBlobPath,
       textureType: 'rough-brush',
+      partnerId: partner.id,
     },
   ];
 
@@ -845,6 +1328,30 @@ export function buildPartnerVectorAssets(
   );
 
   const partnerClipboard: VectorElement[] = [
+    ...(partner.logoImageUrl
+      ? [
+          {
+            id: `clip-partner-img-${partner.id}`,
+            name: `Logo File (${partner.name})`,
+            type: 'image' as const,
+            x: Math.round(canvasWidth * 0.5),
+            y: Math.round(canvasHeight * 0.2),
+            width: 240,
+            height: 150,
+            rotation: 0,
+            scale: 1,
+            color: primaryColor,
+            opacity: 1,
+            zIndex: 25,
+            visible: true,
+            locked: false,
+            pathData: '',
+            imageUrl: partner.logoImageUrl,
+            textureType: 'none' as const,
+            partnerId: partner.id,
+          },
+        ]
+      : []),
     {
       id: `clip-partner-logo-${partner.id}`,
       name: `Monogramma "${partner.logoText}" (${partner.name})`,
@@ -1387,4 +1894,62 @@ export function syncPosterElementsWithWorkshop(
     clientUpdatedAt: Date.now(),
   };
 }
+
+/**
+ * Converte un file immagine (PNG, SVG, WebP, JPG) in un Data URL ottimizzato preservando la trasparenza alpha,
+ * così da poter essere salvato velocemente sia nella libreria Caricamenti che su Cloud Firestore.
+ */
+export function compressImageFileToDataUrl(
+  file: File,
+  maxDimension = 640
+): Promise<{ dataUrl: string; width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Impossibile leggere il file immagine.'));
+    reader.onload = () => {
+      const rawDataUrl = typeof reader.result === 'string' ? reader.result : '';
+      if (!rawDataUrl) {
+        reject(new Error('File immagine vuoto.'));
+        return;
+      }
+      // Se è un SVG e già leggero, manteniamo il Data URL vettoriale nativo
+      if (file.type === 'image/svg+xml' && rawDataUrl.length < 180000) {
+        resolve({ dataUrl: rawDataUrl, width: 320, height: 320 });
+        return;
+      }
+
+      const img = new Image();
+      img.onload = () => {
+        const natW = Math.max(1, img.naturalWidth || img.width || 300);
+        const natH = Math.max(1, img.naturalHeight || img.height || 300);
+        const scale = Math.min(1, maxDimension / Math.max(natW, natH));
+        const targetW = Math.max(1, Math.round(natW * scale));
+        const targetH = Math.max(1, Math.round(natH * scale));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve({ dataUrl: rawDataUrl, width: targetW, height: targetH });
+          return;
+        }
+        ctx.clearRect(0, 0, targetW, targetH);
+        ctx.drawImage(img, 0, 0, targetW, targetH);
+        const compressedPng = canvas.toDataURL('image/png');
+        resolve({
+          dataUrl: compressedPng,
+          width: targetW,
+          height: targetH,
+        });
+      };
+      img.onerror = () => {
+        resolve({ dataUrl: rawDataUrl, width: 300, height: 300 });
+      };
+      img.src = rawDataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 

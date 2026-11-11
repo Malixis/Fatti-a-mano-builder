@@ -20,9 +20,7 @@ import {
 } from './utils/vectorMath';
 import { mergeConfirmedMaterialsIntoInventory } from './utils/roiCalculator';
 import { GraphicBuilder } from './components/GraphicBuilder';
-import { FontTextureEngine } from './components/FontTextureEngine';
 import { LabManager } from './components/LabManager';
-import { SetupArchitectureView } from './components/SetupArchitectureView';
 import {
   FIREBASE_AUTH_SETTINGS_URL,
   FIREBASE_PROJECT_ID,
@@ -46,7 +44,7 @@ import {
 } from './firebase';
 import { Check, Copy, ExternalLink, ShieldAlert, X } from 'lucide-react';
 
-type ActiveModuleTab = 'lab-manager' | 'graphic-builder' | 'font-engine' | 'setup-docs';
+type ActiveModuleTab = 'lab-manager' | 'graphic-builder';
 
 const STORAGE_KEYS = {
   WORKSHOPS: 'fatti_a_mano_workshops_v3',
@@ -948,7 +946,7 @@ export default function App() {
           Fatti a mano
         </a>
 
-        {/* Zona 2: 4 Concise Single-Line Navigation Links */}
+        {/* Zona 2: 2 Navigation Links (Lab Manager ERP & Builder Grafico) */}
         <nav
           aria-label="Navigazione moduli ERP"
           className="flex items-center gap-6 text-sm font-medium text-[#1A2B4C]/80 overflow-x-auto"
@@ -975,30 +973,6 @@ export default function App() {
             }`}
           >
             Builder Grafico
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('font-engine')}
-            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
-              activeTab === 'font-engine'
-                ? 'border-[#B85B43] text-[#1A2B4C] font-semibold'
-                : 'border-transparent hover:text-[#1A2B4C]'
-            }`}
-          >
-            Font &amp; Texture
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('setup-docs')}
-            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
-              activeTab === 'setup-docs'
-                ? 'border-[#B85B43] text-[#1A2B4C] font-semibold'
-                : 'border-transparent hover:text-[#1A2B4C]'
-            }`}
-          >
-            Setup &amp; Architettura
           </button>
         </nav>
 
@@ -1114,36 +1088,10 @@ export default function App() {
             partners={partners}
             selectedPartnerId={activeDesign.partnerId || activeWorkshop.partnerId || ''}
             onSelectPartner={handleSelectBuilderPartner}
-            onOpenFontModal={() => setActiveTab('font-engine')}
+            onSavePartner={handleSavePartner}
             onSaveTemplateCloud={handleSaveTemplateCloud}
             isSavingCloud={isSavingCloud}
             lastSavedLabel={lastSavedLabel}
-          />
-        )}
-
-        {activeTab === 'font-engine' && (
-          <FontTextureEngine
-            canvasCenter={{
-              x: Math.round(activeDesign.width / 2),
-              y: Math.round(activeDesign.height / 2),
-            }}
-            onInsertElement={(newEl) => {
-              setCanvasElements((prev) => [...prev, newEl]);
-              setActiveTab('graphic-builder');
-              setBridgeBanner(
-                `Tracciato testuale "${newEl.name}" aggiunto e salvato nella locandina di "${activeWorkshop.title}"!`
-              );
-              setTimeout(() => setBridgeBanner(null), 3500);
-            }}
-            onAddToClipboard={(newEl) => {
-              setClipboardAssets((prev) => [newEl, ...prev.slice(0, 7)]);
-            }}
-          />
-        )}
-
-        {activeTab === 'setup-docs' && (
-          <SetupArchitectureView
-            onOpenDomainHelper={() => setShowDomainModal(true)}
           />
         )}
       </main>

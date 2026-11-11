@@ -14,6 +14,7 @@ import {
   calculateWorkshopRoi,
   computeMaterialRowBreakdown,
 } from '../utils/roiCalculator';
+import { compressImageFileToDataUrl } from '../utils/vectorMath';
 import { exportPackingListPdf } from '../utils/pdfExporter';
 import {
   requestPhaseTextImprovement,
@@ -31,6 +32,7 @@ import {
   Copy,
   ExternalLink,
   FileDown,
+  ImagePlus,
   Link2,
   Link2Off,
   PackageCheck,
@@ -39,6 +41,7 @@ import {
   Save,
   Sparkles,
   Trash2,
+  Upload,
   Wand2,
   X,
 } from 'lucide-react';
@@ -274,6 +277,35 @@ export const LabManager: React.FC<LabManagerProps> = ({
       venueFeePerPax: saved.defaultVenueFee,
     });
     setShowPartnerEditor(false);
+  };
+
+  const handleUploadPartnerLogoFile = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+    target: 'editing' | 'selected'
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const { dataUrl } = await compressImageFileToDataUrl(file, 420);
+      if (target === 'editing') {
+        setEditingPartner((prev) => ({
+          ...prev,
+          logoImageUrl: dataUrl,
+        }));
+      } else if (selectedPartner) {
+        const updatedPartner: PartnerProfile = {
+          ...selectedPartner,
+          logoImageUrl: dataUrl,
+          clientUpdatedAt: Date.now(),
+        };
+        onSavePartner(updatedPartner);
+        setEditingPartner(updatedPartner);
+      }
+    } catch (err) {
+      console.error('Errore caricamento logo partner:', err);
+    } finally {
+      e.target.value = '';
+    }
   };
 
   // Gestione Data & Orario + Google Calendar
@@ -862,27 +894,78 @@ export const LabManager: React.FC<LabManagerProps> = ({
             {selectedPartner && !showPartnerEditor && (
               <div className="p-3.5 bg-[#EADDCD]/85 rounded-xl border border-[#1A2B4C]/15 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2.5">
-                    <div
-                      className="w-10 h-10 rounded-lg flex items-center justify-center font-bold text-xs text-[#EADDCD] shadow-sm shrink-0"
-                      style={{
-                        backgroundColor: selectedPartner.palette[0] || '#1A2B4C',
-                        fontFamily:
-                          selectedPartner.fontStyle === 'craft-rounded'
-                            ? '"Bricolage Grotesque", sans-serif'
-                            : selectedPartner.fontStyle === 'mono-label'
-                            ? '"JetBrains Mono", monospace'
-                            : '"Fraunces", serif',
-                      }}
-                    >
-                      {selectedPartner.logoText}
-                    </div>
+                  <div className="flex items-center gap-3">
+                    {selectedPartner.logoImageUrl ? (
+                      <div className="w-14 h-14 rounded-lg bg-white/90 border border-[#1A2B4C]/20 p-1.5 flex items-center justify-center shadow-sm shrink-0 overflow-hidden">
+                        <img
+                          src={selectedPartner.logoImageUrl}
+                          alt={`Logo ${selectedPartner.name}`}
+                          className="max-w-full max-h-full object-contain"
+                        />
+                      </div>
+                    ) : (
+                      <div
+                        className="w-12 h-12 rounded-lg flex items-center justify-center font-bold text-xs text-[#EADDCD] shadow-sm shrink-0"
+                        style={{
+                          backgroundColor: selectedPartner.palette[0] || '#1A2B4C',
+                          fontFamily:
+                            selectedPartner.fontStyle === 'craft-rounded'
+                              ? '"Bricolage Grotesque", sans-serif'
+                              : selectedPartner.fontStyle === 'mono-label'
+                              ? '"JetBrains Mono", monospace'
+                              : '"Fraunces", serif',
+                        }}
+                      >
+                        {selectedPartner.logoText}
+                      </div>
+                    )}
                     <div>
-                      <div className="text-sm font-bold text-[#1A2B4C]">
-                        {selectedPartner.name}
+                      <div className="text-sm font-bold text-[#1A2B4C] flex items-center gap-2">
+                        <span>{selectedPartner.name}</span>
+                        {selectedPartner.logoImageUrl && (
+                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-[#4A6B53]/15 text-[#4A6B53]">
+                            Logo Caricato
+                          </span>
+                        )}
                       </div>
                       <div className="text-[11px] text-[#1A2B4C]/70">
                         {selectedPartner.address} · Font: <strong>{selectedPartner.fontStyle}</strong>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                        <label
+                          data-testid="quick-upload-partner-logo-label"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-semibold bg-[#1A2B4C] text-[#EADDCD] hover:bg-[#1A2B4C]/90 cursor-pointer transition-colors"
+                        >
+                          <Upload className="w-3 h-3 text-[#D4A373]" />
+                          <span>
+                            {selectedPartner.logoImageUrl
+                              ? 'Sostituisci Logo (PNG/SVG)'
+                              : 'Carica Logo Partner (PNG/SVG)'}
+                          </span>
+                          <input
+                            type="file"
+                            accept="image/png,image/svg+xml,image/webp,image/jpeg"
+                            onChange={(e) => handleUploadPartnerLogoFile(e, 'selected')}
+                            className="hidden"
+                          />
+                        </label>
+                        {selectedPartner.logoImageUrl && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const updated: PartnerProfile = {
+                                ...selectedPartner,
+                                logoImageUrl: undefined,
+                                clientUpdatedAt: Date.now(),
+                              };
+                              onSavePartner(updated);
+                              setEditingPartner(updated);
+                            }}
+                            className="text-[10px] font-semibold text-[#B85B43] hover:underline"
+                          >
+                            Usa solo Monogramma
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1054,15 +1137,75 @@ export const LabManager: React.FC<LabManagerProps> = ({
                   />
                 </div>
 
-                {/* Grafiche del Partner: Logo Monogramma, Forma, Font e Color Palette */}
+                {/* Grafiche del Partner: Caricamento File Logo (PNG/SVG) + Monogramma Opzionale, Forma, Font e Color Palette */}
                 <div className="pt-2 border-t border-[#1A2B4C]/15 space-y-2.5">
                   <span className="block text-[11px] font-bold uppercase tracking-wider text-[#4A6B53]">
-                    Kit Grafico Partner (per il Builder Grafico)
+                    Kit Grafico Partner &amp; Logo (per il Builder Grafico)
                   </span>
+
+                  {/* Upload File Logo Partner (PNG / SVG / WebP) */}
+                  <div className="p-2.5 rounded-lg bg-[#F4ECE1] border border-[#1A2B4C]/20 flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5">
+                      {editingPartner.logoImageUrl ? (
+                        <div className="w-12 h-12 rounded-md bg-white border border-[#1A2B4C]/20 p-1 flex items-center justify-center shrink-0 overflow-hidden">
+                          <img
+                            src={editingPartner.logoImageUrl}
+                            alt="Anteprima Logo Partner"
+                            className="max-w-full max-h-full object-contain"
+                          />
+                        </div>
+                      ) : (
+                        <div className="w-12 h-12 rounded-md bg-[#EADDCD] border border-dashed border-[#1A2B4C]/30 flex items-center justify-center shrink-0 text-[#1A2B4C]/50">
+                          <ImagePlus className="w-5 h-5" />
+                        </div>
+                      )}
+                      <div>
+                        <div className="text-xs font-bold text-[#1A2B4C]">
+                          Logo Ufficiale Partner (PNG / SVG Trasparente)
+                        </div>
+                        <div className="text-[10px] text-[#1A2B4C]/70">
+                          Viene inserito automaticamente nella Locandina e nel kit co-branding del Builder
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <label
+                        data-testid="partner-form-logo-upload"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-[#1A2B4C] text-[#EADDCD] hover:bg-[#1A2B4C]/90 cursor-pointer transition-colors"
+                      >
+                        <Upload className="w-3.5 h-3.5 text-[#D4A373]" />
+                        <span>
+                          {editingPartner.logoImageUrl ? 'Cambia File Logo' : 'Carica Logo PNG/SVG'}
+                        </span>
+                        <input
+                          type="file"
+                          accept="image/png,image/svg+xml,image/webp,image/jpeg"
+                          onChange={(e) => handleUploadPartnerLogoFile(e, 'editing')}
+                          className="hidden"
+                        />
+                      </label>
+                      {editingPartner.logoImageUrl && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditingPartner((prev) => ({
+                              ...prev,
+                              logoImageUrl: undefined,
+                            }))
+                          }
+                          className="px-2 py-1.5 rounded-lg text-[11px] font-semibold text-[#B85B43] hover:bg-[#B85B43]/10"
+                        >
+                          Rimuovi
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     <div>
                       <label className="block text-[10px] font-semibold text-[#1A2B4C] mb-1">
-                        Sigla / Testo Logo
+                        Sigla / Monogramma Opzionale
                       </label>
                       <input
                         type="text"

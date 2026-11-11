@@ -283,6 +283,7 @@ export function sanitizePartnerForFirestore(partner: PartnerProfile, ownerId: st
     commercialDealNotes: (partner.commercialDealNotes || '').trim().slice(0, 1000),
     defaultVenueFee: Math.min(10000, Math.max(0, Number(partner.defaultVenueFee) || 0)),
     logoText: (partner.logoText || partner.name.slice(0, 14) || 'PARTNER').trim().slice(0, 40),
+    logoImageUrl: String(partner.logoImageUrl || '').slice(0, 340000),
     logoShape: (partner.logoShape || 'circle-seal').slice(0, 40),
     fontStyle: (partner.fontStyle || 'editorial-serif').slice(0, 40),
     palette: (partner.palette && partner.palette.length > 0
@@ -338,10 +339,22 @@ function sanitizeVectorElementsList(elements: VectorElement[], maxItems = 80) {
     visible: Boolean(el.visible ?? true),
     locked: Boolean(el.locked ?? false),
     pathData: String(el.pathData || '').slice(0, 8000),
+    imageUrl: String(el.imageUrl || '').slice(0, 220000),
+    closedPath: Boolean(el.closedPath ?? true),
     controlPoints: Array.isArray(el.controlPoints)
       ? el.controlPoints.slice(0, 40).map((pt) => ({
           x: Math.round(Number(pt.x) || 0),
           y: Math.round(Number(pt.y) || 0),
+        }))
+      : [],
+    bezierNodes: Array.isArray(el.bezierNodes)
+      ? el.bezierNodes.slice(0, 40).map((n) => ({
+          x: Math.round(Number(n.x) || 0),
+          y: Math.round(Number(n.y) || 0),
+          inX: Math.round(Number(n.inX ?? n.x) || 0),
+          inY: Math.round(Number(n.inY ?? n.y) || 0),
+          outX: Math.round(Number(n.outX ?? n.x) || 0),
+          outY: Math.round(Number(n.outY ?? n.y) || 0),
         }))
       : [],
     subPaths: Array.isArray(el.subPaths)

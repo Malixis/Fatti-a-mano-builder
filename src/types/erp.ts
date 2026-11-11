@@ -111,6 +111,43 @@ export type FontStyleId =
 
 export type PartnerLogoShape = 'circle-seal' | 'arch-badge' | 'botanical-crest' | 'minimal-box';
 
+export type AlignTargetMode = 'artboard' | 'selection' | 'key-object';
+
+export type AlignOperationId =
+  | 'align-left'
+  | 'align-center-h'
+  | 'align-right'
+  | 'align-center-both'
+  | 'align-top'
+  | 'align-center-v'
+  | 'align-bottom'
+  | 'distribute-top'
+  | 'distribute-center-v'
+  | 'distribute-bottom'
+  | 'distribute-left'
+  | 'distribute-center-h'
+  | 'distribute-right'
+  | 'distribute-spacing-v'
+  | 'distribute-spacing-h';
+
+export interface BezierNode {
+  x: number;
+  y: number;
+  inX: number;
+  inY: number;
+  outX: number;
+  outY: number;
+}
+
+export interface UploadedPngAsset {
+  id: string;
+  name: string;
+  dataUrl: string;
+  width: number;
+  height: number;
+  createdAt: number;
+}
+
 export interface PartnerProfile {
   id: string;
   name: string;
@@ -120,6 +157,7 @@ export interface PartnerProfile {
   commercialDealNotes: string;
   defaultVenueFee: number;
   logoText: string;
+  logoImageUrl?: string; // File logo Partner caricato (PNG / SVG / WebP Data URL)
   logoShape: PartnerLogoShape;
   fontStyle: FontStyleId;
   palette: string[]; // 3-4 colori esadecimali del partner
@@ -145,7 +183,16 @@ export interface PointerSample {
 export interface VectorElement {
   id: string;
   name: string;
-  type: 'freehand' | 'blob' | 'checkerboard' | 'stamp' | 'textured-text' | 'text-box' | 'shape' | 'pen-path';
+  type:
+    | 'freehand'
+    | 'blob'
+    | 'checkerboard'
+    | 'stamp'
+    | 'textured-text'
+    | 'text-box'
+    | 'shape'
+    | 'pen-path'
+    | 'image';
   x: number;
   y: number;
   width: number;
@@ -167,6 +214,9 @@ export interface VectorElement {
   secondaryPathData?: string;
   subPaths?: Array<{ d: string; fill?: string; stroke?: string; strokeWidth?: number }>;
   controlPoints?: Array<{ x: number; y: number }>;
+  bezierNodes?: BezierNode[];
+  closedPath?: boolean;
+  imageUrl?: string;
   shapeKind?: ShapePrimitiveKind;
   cornerRadius?: number;
   stampKind?: StampKind;

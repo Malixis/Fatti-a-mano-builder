@@ -8,6 +8,8 @@ import {
   sanitizeWorkshopForFirestore,
 } from './roiCalculator';
 import {
+  alignAndDistributeElements,
+  buildBezierPathFromNodes,
   buildPartnerVectorAssets,
   buildPosterFromWorkshop,
   chaikinSmooth,
@@ -22,11 +24,13 @@ import {
   syncPosterElementsWithWorkshop,
 } from './vectorMath';
 import {
+  BezierNode,
   FONT_DECLINATIONS,
   InventoryItem,
   MaterialItem,
   PartnerProfile,
   PointerSample,
+  VectorElement,
   WorkshopCard,
 } from '../types/erp';
 
@@ -270,6 +274,86 @@ test('generateFreeformCursorBlobPath, rebuildPathFromControlPoints, and Montserr
   const starShape = generateShapePrimitivePath('star', 540, 675, 240, 240);
   assert.equal(starShape.controlPoints.length, 10);
   assert.ok(starShape.pathData.endsWith('Z'));
+});
+
+test('buildBezierPathFromNodes and alignAndDistributeElements support Pen tool curves and Illustrator Align panel', () => {
+  const bezierNodes: BezierNode[] = [
+    { x: 100, y: 200, inX: 60, inY: 200, outX: 140, outY: 160 },
+    { x: 300, y: 220, inX: 250, inY: 150, outX: 350, outY: 290 },
+    { x: 240, y: 400, inX: 280, inY: 360, outX: 200, outY: 440 },
+  ];
+  const closedBezier = buildBezierPathFromNodes(bezierNodes, true);
+  assert.ok(closedBezier.pathData.startsWith('M 100.0 200.0'));
+  assert.ok(closedBezier.pathData.includes('C 140.0 160.0, 250.0 150.0, 300.0 220.0'));
+  assert.ok(closedBezier.pathData.endsWith('Z'));
+
+  const baseElements: VectorElement[] = [
+    {
+      id: 'el-1',
+      name: 'Box 1',
+      type: 'stamp',
+      x: 200,
+      y: 300,
+      width: 100,
+      height: 80,
+      rotation: 0,
+      scale: 1,
+      color: '#4A6B53',
+      opacity: 1,
+      zIndex: 1,
+      visible: true,
+      locked: false,
+      pathData: '',
+      textureType: 'none',
+    },
+    {
+      id: 'el-2',
+      name: 'Box 2',
+      type: 'stamp',
+      x: 600,
+      y: 500,
+      width: 100,
+      height: 80,
+      rotation: 0,
+      scale: 1,
+      color: '#D85A3A',
+      opacity: 1,
+      zIndex: 2,
+      visible: true,
+      locked: false,
+      pathData: '',
+      textureType: 'none',
+    },
+  ];
+
+  // Align to artboard center cross (1080x1350 -> center 540, 675)
+  const centeredOnArtboard = alignAndDistributeElements(
+    baseElements,
+    ['el-1', 'el-2'],
+    'align-center-both',
+    'artboard',
+    1080,
+    1350,
+    null,
+    0
+  );
+  assert.equal(centeredOnArtboard[0].x, 540);
+  assert.equal(centeredOnArtboard[0].y, 675);
+  assert.equal(centeredOnArtboard[1].x, 540);
+  assert.equal(centeredOnArtboard[1].y, 675);
+
+  // Align left to selection (el-1 left edge = 200 - 50 = 150)
+  const alignedLeftSelection = alignAndDistributeElements(
+    baseElements,
+    ['el-1', 'el-2'],
+    'align-left',
+    'selection',
+    1080,
+    1350,
+    null,
+    0
+  );
+  assert.equal(alignedLeftSelection[1].x, 200);
 });
 
 

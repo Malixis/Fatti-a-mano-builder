@@ -1,5 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  AlignOperationId,
+  AlignTargetMode,
+  BezierNode,
   BlobDrawMode,
   BRAND_PALETTE,
   BrandColorHex,
@@ -14,11 +17,15 @@ import {
   ShapePrimitiveKind,
   StampKind,
   TextureFilterType,
+  UploadedPngAsset,
   VectorElement,
   WorkshopCard,
 } from '../types/erp';
 import {
+  alignAndDistributeElements,
+  buildBezierPathFromNodes,
   buildPartnerVectorAssets,
+  compressImageFileToDataUrl,
   computeSamplePressure,
   generateBrandStamp,
   generateFreeformCursorBlobPath,
@@ -28,20 +35,19 @@ import {
   generateTextVectorBackdropPath,
   generateWavyCheckerboardPath,
   rebuildPathFromControlPoints,
+  translateVectorElementByDelta,
   wrapPosterText,
 } from '../utils/vectorMath';
 import { exportSvgCanvas } from '../utils/pdfExporter';
 import { SvgTextureDefs, getFilterUrl } from './SvgTextureDefs';
 import {
   AlignCenter,
-  AlignJustify,
   AlignLeft,
   AlignRight,
   ArrowDown,
   ArrowUp,
   Building2,
   Check,
-  ClipboardPaste,
   Combine,
   Copy,
   Crosshair,
@@ -51,12 +57,14 @@ import {
   FlipHorizontal,
   FlipVertical,
   Grid,
+  ImagePlus,
+  KeyRound,
   Layers,
   Lock,
   Maximize2,
+  Minimize2,
   Moon,
   MousePointer,
-  Move,
   Paintbrush,
   PenTool,
   Pipette,
@@ -95,7 +103,8 @@ interface GraphicBuilderProps {
   partners: PartnerProfile[];
   selectedPartnerId: string;
   onSelectPartner: (partnerId: string) => void;
-  onOpenFontModal: () => void;
+  onSavePartner?: (partner: PartnerProfile) => void;
+  onOpenFontModal?: () => void;
   onSaveTemplateCloud?: () => void;
   isSavingCloud?: boolean;
   lastSavedLabel?: string;
@@ -139,6 +148,35 @@ const CUSTOM_FONT_STORAGE_KEYS: Record<BuilderFontFamily, string> = {
   Montserrat: 'fatti_a_mano_custom_font_montserrat',
 };
 
+const UPLOADED_PNGS_STORAGE_KEY = 'fatti_a_mano_uploaded_pngs_v1';
+
+const DEFAULT_UPLOADED_PNGS: UploadedPngAsset[] = [
+  {
+    id: 'default-png-monstera',
+    name: 'Foglia Botanica PNG',
+    dataUrl:
+      'data:image/svg+xml;utf8,' +
+      encodeURIComponent(
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240"><path d="M118 215 C90 190 42 155 46 112 C49 85 88 108 94 94 C72 64 60 28 84 18 C104 10 112 58 122 64 C122 25 138 6 158 14 C176 22 154 68 160 80 C182 52 212 42 218 66 C224 88 176 110 170 124 C196 118 220 135 208 162 C196 188 148 186 134 215 Z" fill="#4A6B53"/></svg>`
+      ),
+    width: 240,
+    height: 240,
+    createdAt: 1700000000000,
+  },
+  {
+    id: 'default-png-vaso-terracotta',
+    name: 'Anfora Ceramica PNG',
+    dataUrl:
+      'data:image/svg+xml;utf8,' +
+      encodeURIComponent(
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240"><path d="M88 34 H152 L142 68 C178 88 192 128 176 174 C164 204 144 216 120 216 C96 216 76 204 64 174 C48 128 62 88 98 68 Z" fill="#B85B43"/><path d="M82 52 C62 54 54 74 68 92" fill="none" stroke="#1A2B4C" stroke-width="10" stroke-linecap="round"/><path d="M158 52 C178 54 186 74 172 92" fill="none" stroke="#1A2B4C" stroke-width="10" stroke-linecap="round"/></svg>`
+      ),
+    width: 240,
+    height: 240,
+    createdAt: 1700000001000,
+  },
+];
+
 export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
   elements,
   setElements,
@@ -155,6 +193,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
   partners,
   selectedPartnerId,
   onSelectPartner,
+  onSavePartner,
   onOpenFontModal,
   onSaveTemplateCloud,
   isSavingCloud,
@@ -169,6 +208,34 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
       return 'adobe-dark';
     }
   });
+
+  // Modalità Schermo Intero (Fullscreen) vs Ridotta
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+
+  const toggleFullscreenMode = () => {
+    setIsFullscreen((prev) => {
+      const next = !prev;
+      if (next) {
+        setZoom((z) => (z < 0.56 ? 0.62 : z));
+        try {
+          if (document.documentElement.requestFullscreen && !document.fullscreenElement) {
+            document.documentElement.requestFullscreen().catch(() => {});
+          }
+        } catch {
+          // fallback CSS fixed inset-0
+        }
+      } else {
+        try {
+          if (document.fullscreenElement && document.exitFullscreen) {
+            document.exitFullscreen().catch(() => {});
+          }
+        } catch {
+          // ignore
+        }
+      }
+      return next;
+    });
+  };
 
   const toggleWorkspaceTheme = () => {
     setWorkspaceTheme((prev) => {
@@ -210,7 +277,9 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
   const [activeLineHeight, setActiveLineHeight] = useState<number>(1.2);
   const [activeLetterSpacing, setActiveLetterSpacing] = useState<number>(0);
   const [activeTextAlign, setActiveTextAlign] = useState<'left' | 'center' | 'right'>('center');
-  const [activeTextTransform, setActiveTextTransform] = useState<'none' | 'uppercase' | 'lowercase'>('none');
+  const [activeTextTransform, setActiveTextTransform] = useState<
+    'none' | 'uppercase' | 'lowercase'
+  >('none');
   const [customLoadedFonts, setCustomLoadedFonts] = useState<Record<BuilderFontFamily, string>>({
     Montserrat: '',
     'Akena Otos': '',
@@ -223,17 +292,48 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
   const [activeCornerRadius, setActiveCornerRadius] = useState<number>(16);
   const [brushSize, setBrushSize] = useState<number>(28);
 
-  // Selezione, Righelli, Griglia e Pannelli Studio
+  // Selezione Singola & Multipla (Shift+Click) + Oggetto Chiave per Pannello Allinea Illustrator
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [keyObjectId, setKeyObjectId] = useState<string | null>(null);
+  const [alignTargetMode, setAlignTargetMode] = useState<AlignTargetMode>('artboard');
+  const [distributeSpacingValue, setDistributeSpacingValue] = useState<number>(0);
+
   const [selectedNodeIndex, setSelectedNodeIndex] = useState<number | null>(null);
   const [showRulers, setShowRulers] = useState<boolean>(true);
   const [showGrid, setShowGrid] = useState<boolean>(true);
-  const [rightDockTab, setRightDockTab] = useState<'character' | 'properties' | 'layers'>('character');
+  const [rightDockTab, setRightDockTab] = useState<
+    'character' | 'properties' | 'uploads' | 'layers'
+  >('properties');
   const [zoom, setZoom] = useState<number>(0.48);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
-  // Pen Tool (P) stato punti in costruzione
-  const [penDraftPoints, setPenDraftPoints] = useState<Array<{ x: number; y: number }>>([]);
+  // Libreria Caricamenti PNG (Stile Canva) salvata in localStorage
+  const [uploadedPngs, setUploadedPngs] = useState<UploadedPngAsset[]>(() => {
+    try {
+      const raw = localStorage.getItem(UPLOADED_PNGS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as UploadedPngAsset[];
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return DEFAULT_UPLOADED_PNGS;
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(UPLOADED_PNGS_STORAGE_KEY, JSON.stringify(uploadedPngs));
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [uploadedPngs]);
+
+  // Bezier Pen Tool (P): punti di ancoraggio + maniglie direzionali (inX/inY, outX/outY)
+  const [penDraftNodes, setPenDraftNodes] = useState<BezierNode[]>([]);
   const [cursorCoords, setCursorCoords] = useState<{ x: number; y: number }>({ x: 540, y: 675 });
 
   // Undo / Redo Stack (fino a 40 step)
@@ -242,7 +342,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
 
   // Input & Pointer telemetry per Apple Pencil / Trackpad / Palm Rejection
   const [pointerModeLabel, setPointerModeLabel] = useState<string>(
-    'Illustrator Vector Engine · Supporto Cursore, Trackpad & Apple Pencil'
+    'Illustrator Vector Engine · Penna Bézier, Allinea & Caricamenti PNG'
   );
   const [livePressure, setLivePressure] = useState<number>(0.5);
   const [liveSamples, setLiveSamples] = useState<PointerSample[]>([]);
@@ -256,7 +356,15 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const fontFileInputRef = useRef<HTMLInputElement | null>(null);
+  const pngUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const partnerLogoInputRef = useRef<HTMLInputElement | null>(null);
+
   const isDrawingRef = useRef<boolean>(false);
+  // Riferimento attivo mentre l'utente trascina per estrarre le maniglie di Bézier appena cliccato col Pen Tool (P)
+  const isDraggingPenDraftHandleRef = useRef<{
+    nodeIndex: number;
+  } | null>(null);
+
   const isDraggingElementRef = useRef<{
     id: string;
     startX: number;
@@ -264,11 +372,15 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     origX: number;
     origY: number;
     origControlPoints?: Array<{ x: number; y: number }>;
+    origBezierNodes?: BezierNode[];
   } | null>(null);
+
   const isDraggingNodeRef = useRef<{
     elementId: string;
     nodeIndex: number;
+    handleType: 'anchor' | 'in' | 'out';
   } | null>(null);
+
   const isResizingHandleRef = useRef<{
     elementId: string;
     handle: 'nw' | 'ne' | 'se' | 'sw' | 'n' | 'e' | 's' | 'w';
@@ -280,6 +392,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     origH: number;
     origFontSize: number;
   } | null>(null);
+
   const penActiveTimestampRef = useRef<number>(0);
   const longPressTimerRef = useRef<number | null>(null);
   const activeTouchesRef = useRef<Map<number, { x: number; y: number }>>(new Map());
@@ -287,6 +400,25 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
 
   const activePartner = partners.find((p) => p.id === selectedPartnerId) || null;
   const selectedElement = elements.find((el) => el.id === selectedId) || null;
+
+  // Mantiene sincronizzati selectedId e selectedIds
+  const selectSingleElement = (id: string | null) => {
+    setSelectedId(id);
+    setSelectedIds(id ? [id] : []);
+    setKeyObjectId(null);
+  };
+
+  const toggleMultiSelectElement = (id: string) => {
+    setSelectedIds((prev) => {
+      const exists = prev.includes(id);
+      const next = exists ? prev.filter((item) => item !== id) : [...prev, id];
+      setSelectedId(next[next.length - 1] || null);
+      if (next.length >= 2 && alignTargetMode === 'artboard') {
+        setAlignTargetMode('selection');
+      }
+      return next;
+    });
+  };
 
   const notify = (msg: string) => {
     setStatusNotice(msg);
@@ -421,6 +553,107 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     e.target.value = '';
   };
 
+  // Caricamento file PNG nella Libreria "Caricamenti" (Stile Canva)
+  const handleUploadPngFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    const newAssets: UploadedPngAsset[] = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      try {
+        const { dataUrl, width, height } = await compressImageFileToDataUrl(file, 720);
+        const asset: UploadedPngAsset = {
+          id: `png-${Date.now()}-${i}`,
+          name: file.name.replace(/\.[^.]+$/, '') || 'Immagine PNG',
+          dataUrl,
+          width,
+          height,
+          createdAt: Date.now(),
+        };
+        newAssets.push(asset);
+      } catch (err) {
+        console.error('Errore caricamento PNG:', err);
+      }
+    }
+
+    if (newAssets.length > 0) {
+      setUploadedPngs((prev) => [...newAssets, ...prev]);
+      // Inserisce subito il primo PNG caricato sulla tavola da disegno!
+      insertPngAssetOnCanvas(newAssets[0]);
+      notify(`Caricato "${newAssets[0].name}" in Caricamenti e aggiunto alla locandina!`);
+    }
+    e.target.value = '';
+  };
+
+  const insertPngAssetOnCanvas = (asset: UploadedPngAsset) => {
+    const maxZ = elements.reduce((acc, el) => Math.max(acc, el.zIndex), 0);
+    const maxSide = 340;
+    const ratio = Math.min(1, maxSide / Math.max(asset.width || 240, asset.height || 240));
+    const w = Math.max(80, Math.round((asset.width || 240) * ratio));
+    const h = Math.max(80, Math.round((asset.height || 240) * ratio));
+
+    const newImageLayer: VectorElement = {
+      id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      name: `PNG: ${asset.name}`,
+      type: 'image',
+      x: Math.round(canvasSize.width / 2),
+      y: Math.round(canvasSize.height / 2),
+      width: w,
+      height: h,
+      rotation: 0,
+      scale: 1,
+      color: activeColor,
+      opacity: 1,
+      zIndex: maxZ + 1,
+      visible: true,
+      locked: false,
+      pathData: '',
+      imageUrl: asset.dataUrl,
+      textureType: 'none',
+    };
+    commitElementsChange((prev) => [...prev, newImageLayer]);
+    selectSingleElement(newImageLayer.id);
+    notify(`Inserito "${asset.name}" sulla tavola da disegno`);
+  };
+
+  const handleRemoveUploadedPng = (id: string) => {
+    setUploadedPngs((prev) => prev.filter((item) => item.id !== id));
+    notify('Immagine rimossa dalla libreria Caricamenti');
+  };
+
+  // Caricamento Logo Partner direttamente dal Builder Grafico
+  const handleBuilderPartnerLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !activePartner) return;
+    try {
+      const { dataUrl } = await compressImageFileToDataUrl(file, 420);
+      const updatedPartner: PartnerProfile = {
+        ...activePartner,
+        logoImageUrl: dataUrl,
+        clientUpdatedAt: Date.now(),
+      };
+      if (onSavePartner) {
+        onSavePartner(updatedPartner);
+      }
+      const { partnerElements } = buildPartnerVectorAssets(
+        updatedPartner,
+        canvasSize.width,
+        canvasSize.height
+      );
+      commitElementsChange((prev) => {
+        const withoutOld = prev.filter((el) => !el.id.startsWith('partner-badge-'));
+        return [...withoutOld, partnerElements[0]];
+      });
+      selectSingleElement(partnerElements[0].id);
+      notify(`Logo di ${activePartner.name} caricato e inserito sulla locandina!`);
+    } catch (err) {
+      console.error('Errore upload logo partner:', err);
+    } finally {
+      e.target.value = '';
+    }
+  };
+
   const handlePartnerDropdownChange = (partnerId: string) => {
     onSelectPartner(partnerId);
     if (!partnerId) {
@@ -475,17 +708,18 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     notify(`Inseriti Logo e Macchia Palette di ${activePartner.name}`);
   };
 
-  // Finalizza il tracciato Penna (P)
+  // Finalizza il tracciato Penna Bézier (P) con punti di ancoraggio e maniglie direzionali
   const finishPenPath = (closed = true) => {
-    if (penDraftPoints.length < 2) {
-      setPenDraftPoints([]);
+    isDraggingPenDraftHandleRef.current = null;
+    if (penDraftNodes.length < 2) {
+      setPenDraftNodes([]);
       return;
     }
     const maxZ = elements.reduce((acc, el) => Math.max(acc, el.zIndex), 0);
-    const rebuilt = rebuildPathFromControlPoints(penDraftPoints, closed);
+    const rebuilt = buildBezierPathFromNodes(penDraftNodes, closed);
     const newPenEl: VectorElement = {
       id: `pen-${Date.now()}`,
-      name: closed ? 'Forma Penna Bézier Chiusa' : 'Tracciato Penna Aperto',
+      name: closed ? 'Tracciato Penna Bézier Chiuso' : 'Tracciato Penna Bézier Aperto',
       type: 'pen-path',
       x: rebuilt.x,
       y: rebuilt.y,
@@ -495,23 +729,70 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
       scale: 1,
       color: closed ? activeColor : 'none',
       strokeColor: activeStrokeColor !== 'none' ? activeStrokeColor : activeColor,
-      strokeWidth: activeStrokeWidth > 0 ? activeStrokeWidth : closed ? 0 : 4,
+      strokeWidth: activeStrokeWidth > 0 ? activeStrokeWidth : closed ? 3 : 5,
       strokeDasharray: activeStrokeDash,
       opacity: 0.96,
       zIndex: maxZ + 1,
       visible: true,
       locked: false,
       pathData: rebuilt.pathData,
-      controlPoints: penDraftPoints,
+      controlPoints: rebuilt.controlPoints,
+      bezierNodes: penDraftNodes,
+      closedPath: closed,
       textureType: activeTexture,
     };
     commitElementsChange((prev) => [...prev, newPenEl]);
-    setSelectedId(newPenEl.id);
-    setPenDraftPoints([]);
-    notify('Tracciato Penna Bézier completato (modificabile coi nodi "A")');
+    selectSingleElement(newPenEl.id);
+    setPenDraftNodes([]);
+    notify('Tracciato Bézier completato (modificabile con ancore e maniglie "A")');
   };
 
-  // Scorciatoie da tastiera stile Adobe Illustrator (V, A, P, B, Shift+B, T, M, W, S, I, Ctrl+Z, Ctrl+C, Ctrl+V, Invio, Canc)
+  // Esegue un'operazione del Pannello "Allinea" di Adobe Illustrator
+  const executeIllustratorAlign = (operation: AlignOperationId) => {
+    const activeSelectionIds =
+      selectedIds.length > 0
+        ? selectedIds
+        : selectedId
+        ? [selectedId]
+        : [];
+
+    // Se è un'operazione di distribuzione e c'è solo 1 o 0 oggetti selezionati, ma ci sono più oggetti sulla tavola,
+    // se in modalità 'artboard' distribuiamo tutti i livelli non bloccati oppure avvisiamo di fare Shift+Clic
+    let targetIds = activeSelectionIds;
+    if (
+      (operation.startsWith('distribute-')) &&
+      targetIds.length < 2
+    ) {
+      const unlockedIds = elements.filter((e) => !e.locked && e.visible).map((e) => e.id);
+      if (unlockedIds.length >= 2 && alignTargetMode === 'artboard') {
+        targetIds = unlockedIds;
+      } else {
+        notify('Seleziona 2 o più oggetti (Shift + Clic) per distribuirli tra loro');
+        return;
+      }
+    }
+
+    if (targetIds.length === 0) {
+      notify('Seleziona almeno un oggetto sulla tavola per allinearlo');
+      return;
+    }
+
+    commitElementsChange((prev) =>
+      alignAndDistributeElements(
+        prev,
+        targetIds,
+        operation,
+        alignTargetMode,
+        canvasSize.width,
+        canvasSize.height,
+        keyObjectId || targetIds[0],
+        distributeSpacingValue
+      )
+    );
+    notify(`Applicato allineamento Illustrator (${operation})`);
+  };
+
+  // Scorciatoie da tastiera stile Adobe Illustrator (V, A, P, B, Shift+B, T, M, W, S, I, F, Ctrl+Z, Ctrl+C, Ctrl+V, Invio, Canc)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -556,25 +837,32 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
         return;
       }
 
-      if (e.key === 'Enter' && activeTool === 'pen' && penDraftPoints.length >= 2) {
+      if (e.key === 'Enter' && activeTool === 'pen' && penDraftNodes.length >= 2) {
         e.preventDefault();
         finishPenPath(true);
         return;
       }
 
       if (e.key === 'Escape') {
-        setPenDraftPoints([]);
-        setSelectedId(null);
+        isDraggingPenDraftHandleRef.current = null;
+        setPenDraftNodes([]);
+        selectSingleElement(null);
         setSelectedNodeIndex(null);
+        if (isFullscreen) {
+          setIsFullscreen(false);
+        }
         return;
       }
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedId) {
+        const idsToRemove = new Set(
+          selectedIds.length > 0 ? selectedIds : selectedId ? [selectedId] : []
+        );
+        if (idsToRemove.size > 0) {
           commitElementsChange((prev) =>
-            prev.filter((el) => el.id !== selectedId || el.locked)
+            prev.filter((el) => !idsToRemove.has(el.id) || el.locked)
           );
-          setSelectedId(null);
+          selectSingleElement(null);
           setSelectedNodeIndex(null);
         }
         return;
@@ -595,11 +883,22 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
         else if (k === 'w') setActiveTool('checkerboard');
         else if (k === 's') setActiveTool('stamp');
         else if (k === 'i') setActiveTool('eyedropper');
+        else if (k === 'f') toggleFullscreenMode();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedId, elements, clipboard, activeTool, penDraftPoints, historyPast, historyFuture]);
+  }, [
+    selectedId,
+    selectedIds,
+    elements,
+    clipboard,
+    activeTool,
+    penDraftNodes,
+    historyPast,
+    historyFuture,
+    isFullscreen,
+  ]);
 
   const toCanvasCoords = (clientX: number, clientY: number): { x: number; y: number } => {
     const svg = svgRef.current;
@@ -622,7 +921,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
       locked: false,
     };
     commitElementsChange((prev) => [...prev, cloned]);
-    setSelectedId(cloned.id);
+    selectSingleElement(cloned.id);
     notify(`Incollato "${item.name}"`);
   };
 
@@ -682,7 +981,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     };
 
     commitElementsChange((prev) => [...prev, newTextBox]);
-    setSelectedId(newTextBox.id);
+    selectSingleElement(newTextBox.id);
     setRightDockTab('character');
     setActiveTool('select');
     notify(`Aggiunta Casella di Testo in ${activeFontFamily} (${declLabel})`);
@@ -724,34 +1023,6 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
           width: Math.max(180, boxW),
           height: Math.max(70, Math.round(linesCount * fSize * lHeight + 32)),
         };
-      })
-    );
-  };
-
-  // Strumenti di Allineamento Illustrator (6 direzioni rispetto alla Tavola da Disegno)
-  const alignSelectedElement = (
-    mode: 'left' | 'center-h' | 'right' | 'top' | 'center-v' | 'bottom'
-  ) => {
-    if (!selectedElement || selectedElement.locked) return;
-    const halfW = selectedElement.width / 2;
-    const halfH = selectedElement.height / 2;
-    let targetX = selectedElement.x;
-    let targetY = selectedElement.y;
-
-    if (mode === 'left') targetX = Math.round(halfW + 40);
-    if (mode === 'center-h') targetX = Math.round(canvasSize.width / 2);
-    if (mode === 'right') targetX = Math.round(canvasSize.width - halfW - 40);
-    if (mode === 'top') targetY = Math.round(halfH + 40);
-    if (mode === 'center-v') targetY = Math.round(canvasSize.height / 2);
-    if (mode === 'bottom') targetY = Math.round(canvasSize.height - halfH - 40);
-
-    const dx = targetX - selectedElement.x;
-    const dy = targetY - selectedElement.y;
-
-    commitElementsChange((prev) =>
-      prev.map((el) => {
-        if (el.id !== selectedElement.id) return el;
-        return translateVectorElement(el, dx, dy);
       })
     );
   };
@@ -812,141 +1083,50 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
         .filter((el) => el.id !== selectedElement.id && el.id !== targetBelow.id)
         .concat(unitedElement)
     );
-    setSelectedId(unitedElement.id);
+    selectSingleElement(unitedElement.id);
     notify('Pathfinder: Tracciati uniti in una forma composta!');
   };
 
-  // Converte qualsiasi forma selezionata in una Macchia Organica modificabile coi nodi (A)
+  // Converte qualsiasi forma selezionata in un tracciato Bézier con maniglie modificabili (A)
   const handleConvertSelectedToOrganicBlob = () => {
     if (!selectedElement || selectedElement.locked) return;
     const rx = Math.max(40, selectedElement.width / 2);
     const ry = Math.max(40, selectedElement.height / 2);
-    const lobes = 10;
-    const pts: Array<{ x: number; y: number }> = [];
+    const lobes = 8;
+    const bezierNodes: BezierNode[] = [];
     for (let i = 0; i < lobes; i++) {
       const angle = (i / lobes) * Math.PI * 2;
-      const factor = 1 + Math.sin(angle * 2 + i) * 0.16;
-      pts.push({
-        x: Math.round(selectedElement.x + Math.cos(angle) * rx * factor),
-        y: Math.round(selectedElement.y + Math.sin(angle) * ry * factor),
+      const factor = 1 + Math.sin(angle * 2 + i) * 0.14;
+      const ax = Math.round(selectedElement.x + Math.cos(angle) * rx * factor);
+      const ay = Math.round(selectedElement.y + Math.sin(angle) * ry * factor);
+      const tangentX = -Math.sin(angle) * rx * 0.28;
+      const tangentY = Math.cos(angle) * ry * 0.28;
+      bezierNodes.push({
+        x: ax,
+        y: ay,
+        inX: Math.round(ax - tangentX),
+        inY: Math.round(ay - tangentY),
+        outX: Math.round(ax + tangentX),
+        outY: Math.round(ay + tangentY),
       });
     }
-    const rebuilt = rebuildPathFromControlPoints(pts, true);
+    const rebuilt = buildBezierPathFromNodes(bezierNodes, true);
     commitElementsChange((prev) =>
       prev.map((el) =>
         el.id === selectedElement.id
           ? {
               ...el,
-              type: 'blob',
+              type: 'pen-path',
               pathData: rebuilt.pathData,
-              controlPoints: pts,
+              controlPoints: rebuilt.controlPoints,
+              bezierNodes,
+              closedPath: true,
             }
           : el
       )
     );
     setActiveTool('direct-select');
-    notify('Convertito in Macchia Blob con 10 nodi di controllo (trascinali con Selezione Diretta A)');
-  };
-
-  // Trasla qualsiasi elemento vettoriale mantenendo sincronizzati controlPoints e pathData
-  const translateVectorElement = (el: VectorElement, dx: number, dy: number): VectorElement => {
-    const nextX = Math.round(el.x + dx);
-    const nextY = Math.round(el.y + dy);
-
-    if (el.controlPoints && el.controlPoints.length >= 3) {
-      const movedPts = el.controlPoints.map((pt) => ({
-        x: Math.round(pt.x + dx),
-        y: Math.round(pt.y + dy),
-      }));
-      if (el.type === 'shape' && el.shapeKind) {
-        const shapeData = generateShapePrimitivePath(
-          el.shapeKind,
-          nextX,
-          nextY,
-          el.width,
-          el.height,
-          el.cornerRadius || 0
-        );
-        return {
-          ...el,
-          x: nextX,
-          y: nextY,
-          pathData: shapeData.pathData,
-          controlPoints: shapeData.controlPoints,
-        };
-      }
-      const rebuilt = rebuildPathFromControlPoints(movedPts, true);
-      return {
-        ...el,
-        x: nextX,
-        y: nextY,
-        pathData: rebuilt.pathData,
-        controlPoints: movedPts,
-      };
-    }
-
-    if (el.type === 'stamp' && el.stampKind) {
-      const updatedStamp = generateBrandStamp(el.stampKind, nextX, nextY, el.width);
-      return {
-        ...el,
-        x: nextX,
-        y: nextY,
-        pathData: updatedStamp.pathData,
-        subPaths: updatedStamp.subPaths,
-      };
-    }
-
-    if (el.type === 'blob') {
-      return {
-        ...el,
-        x: nextX,
-        y: nextY,
-        pathData: generateOrganicBlobPath(nextX, nextY, el.width / 2, el.height / 2, 2.5),
-      };
-    }
-
-    if (el.type === 'checkerboard') {
-      return {
-        ...el,
-        x: nextX,
-        y: nextY,
-        pathData: generateWavyCheckerboardPath(
-          nextX - el.width / 2,
-          nextY - el.height / 2,
-          el.width,
-          el.height,
-          5,
-          6,
-          12,
-          2.1
-        ),
-      };
-    }
-
-    if (el.type === 'textured-text' && !el.isHandDrawnText) {
-      if (!el.pathData && el.textureType !== 'materic-blob') {
-        return { ...el, x: nextX, y: nextY };
-      }
-      const meta = generateTextVectorBackdropPath(
-        el.textContent || 'Fatti a mano',
-        nextX,
-        nextY,
-        el.fontSize || 64,
-        el.textureType
-      );
-      return {
-        ...el,
-        x: nextX,
-        y: nextY,
-        pathData: meta.pathData,
-      };
-    }
-
-    return {
-      ...el,
-      x: nextX,
-      y: nextY,
-    };
+    notify('Convertito in Tracciato Bézier con ancore e maniglie direzionali (trascinale con A)');
   };
 
   const handleCanvasPointerDown = (e: React.PointerEvent<SVGSVGElement>) => {
@@ -968,7 +1148,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
       penActiveTimestampRef.current = performance.now();
       setPointerModeLabel(`Apple Pencil · Pressione ${(e.pressure * 100).toFixed(0)}%`);
     } else if (e.pointerType === 'mouse') {
-      setPointerModeLabel('Cursore Precisione Illustrator · Bezier & Freeform Blob');
+      setPointerModeLabel('Cursore Precisione Illustrator · Penna Bézier & Allinea');
     } else {
       setPointerModeLabel('Touch iPad · Gesture & Disegno');
     }
@@ -978,22 +1158,33 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
 
     if (activeTool === 'select' || activeTool === 'direct-select') {
       if (e.target === svgRef.current || (e.target as SVGElement).dataset.bg === 'true') {
-        setSelectedId(null);
+        selectSingleElement(null);
         setSelectedNodeIndex(null);
       }
       return;
     }
 
-    // Strumento Penna Vettoriale (P): aggiunge un punto di ancoraggio ad ogni clic
+    // Strumento Penna di Bézier (P): clic per posizionare ancora, trascina per estrarre le maniglie direzionali!
     if (activeTool === 'pen') {
       if (
-        penDraftPoints.length >= 3 &&
-        Math.hypot(coords.x - penDraftPoints[0].x, coords.y - penDraftPoints[0].y) < 28
+        penDraftNodes.length >= 2 &&
+        Math.hypot(coords.x - penDraftNodes[0].x, coords.y - penDraftNodes[0].y) < 28
       ) {
         finishPenPath(true);
         return;
       }
-      setPenDraftPoints((prev) => [...prev, coords]);
+      e.currentTarget.setPointerCapture(e.pointerId);
+      const nextIndex = penDraftNodes.length;
+      const newNode: BezierNode = {
+        x: coords.x,
+        y: coords.y,
+        inX: coords.x,
+        inY: coords.y,
+        outX: coords.x,
+        outY: coords.y,
+      };
+      setPenDraftNodes((prev) => [...prev, newNode]);
+      isDraggingPenDraftHandleRef.current = { nodeIndex: nextIndex };
       return;
     }
 
@@ -1028,7 +1219,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
         textureType: activeTexture,
       };
       commitElementsChange((prev) => [...prev, newStamp]);
-      setSelectedId(newStamp.id);
+      selectSingleElement(newStamp.id);
       return;
     }
 
@@ -1047,7 +1238,6 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     }
 
     // MACCHIA BLOB COL CURSORE (Shift+B) E PENNELLO FLUIDO (B):
-    // Entrambi tracciano liberamente col movimento del cursore senza vincolo di rettangolo!
     isDrawingRef.current = true;
     const pointerType =
       e.pointerType === 'pen' || e.pointerType === 'touch' ? e.pointerType : 'mouse';
@@ -1086,16 +1276,90 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     const coords = toCanvasCoords(e.clientX, e.clientY);
     setCursorCoords(coords);
 
-    // 1. Trascinamento di un singolo Nodo Vettoriale con Selezione Diretta (A)
+    // 0. Estrazione simmetrica delle maniglie direzionali durante il clic-e-trascina col Pen Tool (P)
+    if (isDraggingPenDraftHandleRef.current) {
+      const { nodeIndex } = isDraggingPenDraftHandleRef.current;
+      setPenDraftNodes((prev) =>
+        prev.map((node, idx) => {
+          if (idx !== nodeIndex) return node;
+          return {
+            ...node,
+            outX: coords.x,
+            outY: coords.y,
+            inX: Math.round(2 * node.x - coords.x),
+            inY: Math.round(2 * node.y - coords.y),
+          };
+        })
+      );
+      return;
+    }
+
+    // 1. Trascinamento di un Punto di Ancoraggio o di una Maniglia di Bézier con Selezione Diretta (A)
     if (isDraggingNodeRef.current) {
-      const { elementId, nodeIndex } = isDraggingNodeRef.current;
+      const { elementId, nodeIndex, handleType } = isDraggingNodeRef.current;
       setElements((prev) =>
         prev.map((el) => {
-          if (el.id !== elementId || el.locked || !el.controlPoints) return el;
+          if (el.id !== elementId || el.locked) return el;
+
+          // Se l'elemento possiede nodi Bézier completi con maniglie (inX/inY, outX/outY)
+          if (Array.isArray(el.bezierNodes) && el.bezierNodes.length > 0) {
+            const nextBezierNodes = el.bezierNodes.map((n, idx) => {
+              if (idx !== nodeIndex) return n;
+              if (handleType === 'anchor') {
+                const dx = coords.x - n.x;
+                const dy = coords.y - n.y;
+                return {
+                  x: coords.x,
+                  y: coords.y,
+                  inX: Math.round(n.inX + dx),
+                  inY: Math.round(n.inY + dy),
+                  outX: Math.round(n.outX + dx),
+                  outY: Math.round(n.outY + dy),
+                };
+              }
+              if (handleType === 'out') {
+                return {
+                  ...n,
+                  outX: coords.x,
+                  outY: coords.y,
+                  inX: e.altKey ? n.inX : Math.round(2 * n.x - coords.x),
+                  inY: e.altKey ? n.inY : Math.round(2 * n.y - coords.y),
+                };
+              }
+              // handleType === 'in'
+              return {
+                ...n,
+                inX: coords.x,
+                inY: coords.y,
+                outX: e.altKey ? n.outX : Math.round(2 * n.x - coords.x),
+                outY: e.altKey ? n.outY : Math.round(2 * n.y - coords.y),
+              };
+            });
+
+            const rebuilt = buildBezierPathFromNodes(
+              nextBezierNodes,
+              el.closedPath !== false
+            );
+            return {
+              ...el,
+              x: rebuilt.x,
+              y: rebuilt.y,
+              width: rebuilt.width,
+              height: rebuilt.height,
+              pathData: rebuilt.pathData,
+              controlPoints: rebuilt.controlPoints,
+              bezierNodes: nextBezierNodes,
+            };
+          }
+
+          if (!el.controlPoints) return el;
           const nextPts = el.controlPoints.map((pt, idx) =>
             idx === nodeIndex ? { x: coords.x, y: coords.y } : pt
           );
-          const rebuilt = rebuildPathFromControlPoints(nextPts, true);
+          const rebuilt = rebuildPathFromControlPoints(
+            nextPts,
+            el.closedPath !== false
+          );
           return {
             ...el,
             x: rebuilt.x,
@@ -1136,6 +1400,30 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
       setElements((prev) =>
         prev.map((el) => {
           if (el.id !== resize.elementId || el.locked) return el;
+          if (Array.isArray(el.bezierNodes) && el.bezierNodes.length >= 2) {
+            const sx = newW / Math.max(20, el.width);
+            const sy = newH / Math.max(20, el.height);
+            const scaledNodes = el.bezierNodes.map((n) => ({
+              x: Math.round(el.x + (n.x - el.x) * sx),
+              y: Math.round(el.y + (n.y - el.y) * sy),
+              inX: Math.round(el.x + (n.inX - el.x) * sx),
+              inY: Math.round(el.y + (n.inY - el.y) * sy),
+              outX: Math.round(el.x + (n.outX - el.x) * sx),
+              outY: Math.round(el.y + (n.outY - el.y) * sy),
+            }));
+            const rebuilt = buildBezierPathFromNodes(
+              scaledNodes,
+              el.closedPath !== false
+            );
+            return {
+              ...el,
+              width: newW,
+              height: newH,
+              pathData: rebuilt.pathData,
+              controlPoints: rebuilt.controlPoints,
+              bezierNodes: scaledNodes,
+            };
+          }
           if (el.controlPoints && el.controlPoints.length >= 3) {
             const scaledPts = el.controlPoints.map((pt) => ({
               x: Math.round(el.x + (pt.x - el.x) * (newW / Math.max(20, el.width))),
@@ -1194,8 +1482,9 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
             x: drag.origX,
             y: drag.origY,
             controlPoints: drag.origControlPoints || el.controlPoints,
+            bezierNodes: drag.origBezierNodes || el.bezierNodes,
           };
-          return translateVectorElement(baseEl, dx, dy);
+          return translateVectorElementByDelta(baseEl, dx, dy);
         })
       );
       return;
@@ -1247,6 +1536,10 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
       longPressTimerRef.current = null;
     }
 
+    if (isDraggingPenDraftHandleRef.current) {
+      isDraggingPenDraftHandleRef.current = null;
+      return;
+    }
     if (isDraggingNodeRef.current) {
       isDraggingNodeRef.current = null;
       return;
@@ -1308,7 +1601,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
           textureType: activeTexture,
         };
         commitElementsChange((prev) => [...prev, newShape]);
-        setSelectedId(newShape.id);
+        selectSingleElement(newShape.id);
       } else {
         const pathData = generateWavyCheckerboardPath(minX, minY, w, h, 5, 6, 13, Date.now() % 7);
         const newCheck: VectorElement = {
@@ -1330,13 +1623,13 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
           textureType: activeTexture,
         };
         commitElementsChange((prev) => [...prev, newCheck]);
-        setSelectedId(newCheck.id);
+        selectSingleElement(newCheck.id);
       }
       setDragBox(null);
       return;
     }
 
-    // Creazione MACCHIA BLOB COL CURSORE (Nessun vincolo di rettangolo!)
+    // Creazione MACCHIA BLOB COL CURSORE
     if (activeTool === 'blob' && liveSamples.length > 0) {
       const freeformBlob = generateFreeformCursorBlobPath(
         liveSamples,
@@ -1346,7 +1639,6 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
       );
 
       if (freeformBlob.pathData) {
-        // Se siamo in modalità 'blob-brush-merge' (Pennello Blob Unione) e c'è una macchia dello stesso colore che si sovrappone, fondila!
         if (blobMode === 'blob-brush-merge' && mergeBlobBrushWithSameColor) {
           const targetBlob = [...elements]
             .reverse()
@@ -1397,7 +1689,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                   : el
               )
             );
-            setSelectedId(targetBlob.id);
+            selectSingleElement(targetBlob.id);
             setLiveSamples([]);
             notify('Pennello Blob: macchia fusa con la forma adiacente dello stesso colore!');
             return;
@@ -1430,7 +1722,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
           textureType: activeTexture,
         };
         commitElementsChange((prev) => [...prev, newBlob]);
-        setSelectedId(newBlob.id);
+        selectSingleElement(newBlob.id);
         notify(
           `Macchia Blob disegnata col cursore (${freeformBlob.controlPoints.length} nodi modificabili con "A")`
         );
@@ -1475,7 +1767,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
           textureType: activeTexture,
         };
         commitElementsChange((prev) => [...prev, newStroke]);
-        setSelectedId(newStroke.id);
+        selectSingleElement(newStroke.id);
       }
       setLiveSamples([]);
     }
@@ -1485,7 +1777,6 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     e: React.PointerEvent<SVGGElement>,
     el: VectorElement
   ) => {
-    // Strumento Contagocce (I): campiona colore, traccia e font dall'elemento cliccato
     if (activeTool === 'eyedropper') {
       e.stopPropagation();
       if (el.color && el.color !== 'none') {
@@ -1503,7 +1794,22 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
 
     if (activeTool !== 'select' && activeTool !== 'direct-select') return;
     e.stopPropagation();
-    setSelectedId(el.id);
+
+    // Selezione Multipla con Shift+Clic per il pannello Allinea/Distribuisci di Illustrator
+    if (e.shiftKey) {
+      toggleMultiSelectElement(el.id);
+      return;
+    }
+
+    // Se siamo in modalità 'key-object' e l'elemento fa già parte di una selezione multipla, impostalo come Oggetto Chiave!
+    if (alignTargetMode === 'key-object' && selectedIds.includes(el.id) && selectedIds.length > 1) {
+      setKeyObjectId(el.id);
+      setSelectedId(el.id);
+      notify(`Oggetto chiave impostato: "${el.name}"`);
+      return;
+    }
+
+    selectSingleElement(el.id);
     setSelectedNodeIndex(null);
 
     if (el.type === 'textured-text') {
@@ -1511,8 +1817,10 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     }
 
     if (activeTool === 'direct-select') {
-      // Se l'elemento selezionato con 'A' non ha ancora controlPoints ed è un blob, generiamoli automaticamente
-      if (!el.controlPoints || el.controlPoints.length === 0) {
+      if (
+        (!el.controlPoints || el.controlPoints.length === 0) &&
+        (!el.bezierNodes || el.bezierNodes.length === 0)
+      ) {
         const rx = Math.max(36, el.width / 2);
         const ry = Math.max(36, el.height / 2);
         const pts: Array<{ x: number; y: number }> = [];
@@ -1541,6 +1849,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
         origX: el.x,
         origY: el.y,
         origControlPoints: el.controlPoints ? [...el.controlPoints] : undefined,
+        origBezierNodes: el.bezierNodes ? [...el.bezierNodes] : undefined,
       };
     }
 
@@ -1597,6 +1906,25 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     return null;
   }, [liveSamples, activeTool, blobMode, brushSize, blobRoughness]);
 
+  // Anteprima live della curva di Bézier del Pen Tool (P)
+  const livePenPreviewPath = React.useMemo(() => {
+    if (activeTool !== 'pen' || penDraftNodes.length === 0) return '';
+    const previewNodes: BezierNode[] = isDraggingPenDraftHandleRef.current
+      ? penDraftNodes
+      : [
+          ...penDraftNodes,
+          {
+            x: cursorCoords.x,
+            y: cursorCoords.y,
+            inX: cursorCoords.x,
+            inY: cursorCoords.y,
+            outX: cursorCoords.x,
+            outY: cursorCoords.y,
+          },
+        ];
+    return buildBezierPathFromNodes(previewNodes, false).pathData;
+  }, [activeTool, penDraftNodes, cursorCoords]);
+
   const getElementFontCss = (el: VectorElement): string => {
     if (el.fontFamily === 'Montserrat') {
       return '"Montserrat", sans-serif';
@@ -1638,19 +1966,19 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     {
       id: 'select',
       shortcut: 'V',
-      label: 'Selezione & Trasforma (V)',
+      label: 'Selezione & Trasforma (V · Shift+Clic per Selezione Multipla)',
       icon: <MousePointer className="w-4 h-4" />,
     },
     {
       id: 'direct-select',
       shortcut: 'A',
-      label: 'Selezione Diretta Nodi Bézier (A)',
+      label: 'Selezione Diretta Ancore & Maniglie Bézier (A)',
       icon: <Crosshair className="w-4 h-4" />,
     },
     {
       id: 'pen',
       shortcut: 'P',
-      label: 'Penna Tracciati Bézier (P)',
+      label: 'Penna di Bézier · Clic per Ancora, Trascina per Maniglie (P)',
       icon: <PenTool className="w-4 h-4" />,
     },
     {
@@ -1697,12 +2025,28 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
     },
   ];
 
+  // Calcolo Bounding Box Multi-Selezione quando sono selezionati più oggetti (Shift+Clic)
+  const multiSelectionBounds = React.useMemo(() => {
+    if (selectedIds.length < 2) return null;
+    const selEls = elements.filter((el) => selectedIds.includes(el.id));
+    if (selEls.length < 2) return null;
+    const left = Math.min(...selEls.map((e) => e.x - e.width / 2));
+    const right = Math.max(...selEls.map((e) => e.x + e.width / 2));
+    const top = Math.min(...selEls.map((e) => e.y - e.height / 2));
+    const bottom = Math.max(...selEls.map((e) => e.y + e.height / 2));
+    return { left, top, width: right - left, height: bottom - top };
+  }, [elements, selectedIds]);
+
   return (
     <div
       data-testid="illustrator-workspace"
-      className={`rounded-xl border shadow-xl overflow-hidden transition-colors ${shellBg}`}
+      className={`border shadow-xl overflow-hidden transition-all ${shellBg} ${
+        isFullscreen
+          ? 'fixed inset-0 z-50 w-screen h-screen rounded-none flex flex-col'
+          : 'rounded-xl'
+      }`}
     >
-      {/* Hidden input per caricamento file font OTF / TTF / WOFF2 */}
+      {/* Hidden inputs per caricamento Font (.OTF/.TTF), Caricamenti PNG (Canva) e Logo Partner */}
       <input
         ref={fontFileInputRef}
         type="file"
@@ -1710,12 +2054,27 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
         onChange={handleCustomFontUpload}
         className="hidden"
       />
+      <input
+        ref={pngUploadInputRef}
+        type="file"
+        multiple
+        accept="image/png,image/webp,image/svg+xml,image/jpeg"
+        onChange={handleUploadPngFiles}
+        className="hidden"
+      />
+      <input
+        ref={partnerLogoInputRef}
+        type="file"
+        accept="image/png,image/svg+xml,image/webp,image/jpeg"
+        onChange={handleBuilderPartnerLogoUpload}
+        className="hidden"
+      />
 
       {/* BARRA SUPERIORE CONTESTUALE ADOBE ILLUSTRATOR (Control Bar) */}
       <div
-        className={`px-3 py-2 border-b flex flex-wrap items-center justify-between gap-2 ${panelBg}`}
+        className={`px-3 py-2 border-b flex flex-wrap items-center justify-between gap-2 shrink-0 ${panelBg}`}
       >
-        {/* Blocco Sinistro: Badge Ai + Selettore Scheda + Formato + Undo/Redo */}
+        {/* Blocco Sinistro: Badge Ai + Selettore Scheda + Formato + Undo/Redo + Allinea Rapido */}
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#FF9A00]/15 border border-[#FF9A00]/40 text-[#FF9A00] text-xs font-bold tracking-tight">
             <span className="font-mono font-extrabold">Ai</span>
@@ -1735,7 +2094,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                 data-testid="builder-workshop-select"
                 value={activeWorkshopId}
                 onChange={(e) => {
-                  setSelectedId(null);
+                  selectSingleElement(null);
                   setSelectedNodeIndex(null);
                   onSelectWorkshop(e.target.value);
                 }}
@@ -1798,63 +2157,65 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
             </button>
           </div>
 
-          {/* Barra Allineamento Rapido Illustrator (6 direzioni) */}
+          {/* Barra Allineamento Rapido Illustrator (7 direzioni come nella foto) */}
           <div
-            className={`hidden xl:flex items-center gap-0.5 rounded border px-1 py-0.5 ${inputBg}`}
-            title="Allinea elemento selezionato alla Tavola da Disegno"
+            className={`hidden xl:flex items-center gap-0.5 rounded border px-1.5 py-0.5 ${inputBg}`}
+            title="Allinea oggetti (clicca per allineare o apri il pannello Allinea)"
           >
+            <span className="text-[10px] font-bold text-[#FF9A00] mr-1">Allinea:</span>
             <button
               type="button"
-              disabled={!selectedElement}
-              onClick={() => alignSelectedElement('left')}
+              onClick={() => executeIllustratorAlign('align-left')}
               title="Allinea a sinistra"
-              className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-[10px] font-mono"
+              className="p-1 rounded hover:bg-white/10 text-[10px] font-mono"
             >
               ⇤
             </button>
             <button
               type="button"
-              disabled={!selectedElement}
-              onClick={() => alignSelectedElement('center-h')}
-              title="Centra orizzontalmente sulla tavola"
-              className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-[10px] font-mono"
+              onClick={() => executeIllustratorAlign('align-center-h')}
+              title="Allinea al centro orizzontale"
+              className="p-1 rounded hover:bg-white/10 text-[10px] font-mono"
             >
               ⇹
             </button>
             <button
               type="button"
-              disabled={!selectedElement}
-              onClick={() => alignSelectedElement('right')}
+              onClick={() => executeIllustratorAlign('align-right')}
               title="Allinea a destra"
-              className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-[10px] font-mono"
+              className="p-1 rounded hover:bg-white/10 text-[10px] font-mono"
             >
               ⇥
             </button>
-            <span className="opacity-30 px-0.5">|</span>
             <button
               type="button"
-              disabled={!selectedElement}
-              onClick={() => alignSelectedElement('top')}
+              onClick={() => executeIllustratorAlign('align-center-both')}
+              title="Allinea al centro assoluto (Croce)"
+              className="p-1 rounded hover:bg-white/10 text-[10px] font-mono text-[#FF9A00] font-bold"
+            >
+              ✚
+            </button>
+            <button
+              type="button"
+              onClick={() => executeIllustratorAlign('align-top')}
               title="Allinea in alto"
-              className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-[10px] font-mono"
+              className="p-1 rounded hover:bg-white/10 text-[10px] font-mono"
             >
               ⇡
             </button>
             <button
               type="button"
-              disabled={!selectedElement}
-              onClick={() => alignSelectedElement('center-v')}
-              title="Centra verticalmente sulla tavola"
-              className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-[10px] font-mono"
+              onClick={() => executeIllustratorAlign('align-center-v')}
+              title="Allinea al centro verticale"
+              className="p-1 rounded hover:bg-white/10 text-[10px] font-mono"
             >
               ⇳
             </button>
             <button
               type="button"
-              disabled={!selectedElement}
-              onClick={() => alignSelectedElement('bottom')}
+              onClick={() => executeIllustratorAlign('align-bottom')}
               title="Allinea in basso"
-              className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-[10px] font-mono"
+              className="p-1 rounded hover:bg-white/10 text-[10px] font-mono"
             >
               ⇣
             </button>
@@ -1896,22 +2257,27 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
           )}
 
           {activeTool === 'pen' && (
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#0D66D0]/20 border border-[#0D66D0]/50 text-xs">
+            <div
+              data-testid="pen-tool-context-bar"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#0D66D0]/20 border border-[#0D66D0]/50 text-xs"
+            >
               <PenTool className="w-3.5 h-3.5 text-[#3B9EFF]" />
               <span className="text-[11px] font-semibold">
-                Punti posizionati: {penDraftPoints.length}
+                Penna Bézier: clicca per ancora, trascina per curvare ({penDraftNodes.length} nodi)
               </span>
-              {penDraftPoints.length >= 2 && (
+              {penDraftNodes.length >= 2 && (
                 <>
                   <button
                     type="button"
+                    data-testid="pen-close-path-btn"
                     onClick={() => finishPenPath(true)}
                     className="px-2 py-0.5 rounded bg-[#0D66D0] text-white text-[11px] font-semibold"
                   >
-                    Chiudi Forma (Invio)
+                    Chiudi Curva (Invio)
                   </button>
                   <button
                     type="button"
+                    data-testid="pen-open-path-btn"
                     onClick={() => finishPenPath(false)}
                     className="px-2 py-0.5 rounded bg-white/10 text-[11px] font-semibold"
                   >
@@ -1923,7 +2289,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
           )}
         </div>
 
-        {/* Blocco Destro: Righelli, Griglia, Tema, Zoom, Export e Salva Cloud */}
+        {/* Blocco Destro: Schermo Intero, Righelli, Griglia, Tema, Zoom, Export e Salva Cloud */}
         <div className="flex flex-wrap items-center gap-1.5">
           {lastSavedLabel && (
             <span
@@ -1933,6 +2299,31 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
               {lastSavedLabel}
             </span>
           )}
+
+          {/* BOTTONE SCHERMO INTERO / RIDUCI (Tasto F) */}
+          <button
+            type="button"
+            data-testid="builder-fullscreen-toggle"
+            onClick={toggleFullscreenMode}
+            title="Passa tra modalità Schermo Intero e vista ridotta (Tasto F)"
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded border text-[11px] font-bold transition-colors ${
+              isFullscreen
+                ? 'bg-[#FF9A00] text-black border-[#FF9A00]'
+                : `${inputBg} hover:border-[#FF9A00]`
+            }`}
+          >
+            {isFullscreen ? (
+              <>
+                <Minimize2 className="w-3.5 h-3.5" />
+                <span>Riduci Finestra</span>
+              </>
+            ) : (
+              <>
+                <Maximize2 className="w-3.5 h-3.5 text-[#FF9A00]" />
+                <span>Schermo Intero</span>
+              </>
+            )}
+          </button>
 
           <button
             type="button"
@@ -1998,24 +2389,13 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
             >
               <ZoomIn className="w-3.5 h-3.5" />
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                setZoom(0.48);
-                setPan({ x: 0, y: 0 });
-              }}
-              title="Adatta tavola allo schermo"
-              className="p-1 rounded hover:bg-white/10"
-            >
-              <Maximize2 className="w-3.5 h-3.5" />
-            </button>
           </div>
 
           {onResetToWorkshopDefault && (
             <button
               type="button"
               onClick={() => {
-                setSelectedId(null);
+                selectSingleElement(null);
                 onResetToWorkshopDefault();
               }}
               title="Rigenera il layout predefinito dai dati della scheda"
@@ -2074,10 +2454,13 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
         </div>
       </div>
 
-      {/* WORKSPACE PRINCIPALE A 3 COLONNE STILE ADOBE ILLUSTRATOR:
-          [Dock Strumenti Verticale Sinistro] | [Tavola da Disegno con Righelli] | [Pannelli Studio Destri] */}
-      <div className="flex flex-col lg:flex-row min-h-[720px]">
-        {/* 1. LEFT VERTICAL TOOL DOCK (Stile Adobe Illustrator) */}
+      {/* WORKSPACE PRINCIPALE A 3 COLONNE STILE ADOBE ILLUSTRATOR */}
+      <div
+        className={`flex flex-col lg:flex-row ${
+          isFullscreen ? 'flex-1 min-h-0 overflow-hidden' : 'min-h-[720px]'
+        }`}
+      >
+        {/* 1. LEFT VERTICAL TOOL DOCK (Stile Adobe Illustrator + Bottone Rapido Caricamenti PNG) */}
         <div
           data-testid="illustrator-left-toolbar"
           className={`flex lg:flex-col items-center justify-between lg:justify-start gap-1.5 p-2 border-b lg:border-b-0 lg:border-r shrink-0 ${panelBg}`}
@@ -2112,11 +2495,30 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                 </button>
               );
             })}
+
+            {/* Bottone Rapido "Caricamenti PNG" stile Canva nel dock sinistro */}
+            <button
+              type="button"
+              data-testid="left-dock-uploads-btn"
+              onClick={() => setRightDockTab('uploads')}
+              title="Caricamenti PNG · Inserisci immagini e sticker trasparenti nella locandina"
+              className={`w-10 h-10 rounded-lg flex flex-col items-center justify-center transition-all mt-1 border ${
+                rightDockTab === 'uploads'
+                  ? 'bg-[#FF9A00] text-black border-[#FF9A00]'
+                  : 'border-white/15 hover:bg-white/10'
+              }`}
+            >
+              <ImagePlus className="w-4 h-4" />
+              <span className="text-[8px] font-mono leading-none mt-0.5">PNG</span>
+            </button>
           </div>
 
           {/* Doppio Selettore Riempimento (Fill) / Traccia (Stroke) stile Illustrator in fondo al dock */}
           <div className="hidden lg:flex flex-col items-center gap-2 mt-4 pt-3 border-t border-white/10">
-            <div className="relative w-10 h-10" title={`Riempimento: ${activeColor} · Traccia: ${activeStrokeColor}`}>
+            <div
+              className="relative w-10 h-10"
+              title={`Riempimento: ${activeColor} · Traccia: ${activeStrokeColor}`}
+            >
               {/* Quadrato Riempimento (Fill) */}
               <div
                 className="w-6 h-6 rounded-sm border-2 border-white shadow cursor-pointer"
@@ -2133,8 +2535,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                       : 'transparent',
                 }}
                 onClick={() => {
-                  const nextStroke =
-                    activeStrokeColor === 'none' ? '#1A2B4C' : 'none';
+                  const nextStroke = activeStrokeColor === 'none' ? '#1A2B4C' : 'none';
                   setActiveStrokeColor(nextStroke);
                   if (nextStroke !== 'none' && activeStrokeWidth === 0) {
                     setActiveStrokeWidth(4);
@@ -2147,9 +2548,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                               ...el,
                               strokeColor: nextStroke,
                               strokeWidth:
-                                nextStroke !== 'none'
-                                  ? Math.max(3, el.strokeWidth || 4)
-                                  : 0,
+                                nextStroke !== 'none' ? Math.max(3, el.strokeWidth || 4) : 0,
                             }
                           : el
                       )
@@ -2188,27 +2587,34 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
               ))}
             </div>
 
-            <button
-              type="button"
-              onClick={onOpenFontModal}
-              title="Laboratorio Glifi Vettoriali & Font Custom"
-              className="w-9 h-9 rounded-lg bg-[#4A6B53] text-white flex items-center justify-center hover:bg-[#3d5945] mt-1"
-            >
-              <Sparkles className="w-4 h-4" />
-            </button>
+            {onOpenFontModal && (
+              <button
+                type="button"
+                onClick={onOpenFontModal}
+                title="Laboratorio Glifi Vettoriali & Font Custom"
+                className="w-9 h-9 rounded-lg bg-[#4A6B53] text-white flex items-center justify-center hover:bg-[#3d5945] mt-1"
+              >
+                <Sparkles className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
 
         {/* 2. CENTER ARTBOARD VIEWPORT CON RIGHELLI PIXEL E BOUNDING BOX ILLUSTRATOR */}
-        <div className={`flex-1 flex flex-col min-w-0 ${artboardSurroundBg}`}>
+        <div className={`flex-1 flex flex-col min-w-0 min-h-0 ${artboardSurroundBg}`}>
           {/* Sotto-barra stato e scorciatoie contestuali */}
           <div
-            className={`px-3 py-1.5 border-b text-[11px] flex flex-wrap items-center justify-between gap-2 ${panelBg}`}
+            className={`px-3 py-1.5 border-b text-[11px] flex flex-wrap items-center justify-between gap-2 shrink-0 ${panelBg}`}
           >
             <div className="flex items-center gap-3 truncate">
               <span className="font-semibold text-[#FF9A00]">
                 {ILLUSTRATOR_TOOLS.find((t) => t.id === activeTool)?.label}
               </span>
+              {selectedIds.length > 1 && (
+                <span className="px-2 py-0.5 rounded bg-[#0D66D0] text-white font-semibold">
+                  {selectedIds.length} oggetti selezionati (Shift+Clic)
+                </span>
+              )}
               <span className={`hidden md:inline ${mutedText}`}>{pointerModeLabel}</span>
             </div>
             <div className="flex items-center gap-3 shrink-0 font-mono">
@@ -2225,7 +2631,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
           </div>
 
           {/* Contenitore Righelli + Artboard */}
-          <div className="relative flex-1 overflow-auto flex items-center justify-center p-6 sm:p-10 min-h-[560px]">
+          <div className="relative flex-1 overflow-auto flex items-center justify-center p-6 sm:p-10 min-h-[540px]">
             {/* Righello Orizzontale Superiore */}
             {showRulers && (
               <div
@@ -2309,7 +2715,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                   fill="url(#kraft-paper-grain)"
                 />
 
-                {/* Griglia Vettoriale Smart Illustrator (Non esportata se disattivata, marcata data-ui-overlay) */}
+                {/* Griglia Vettoriale Smart Illustrator */}
                 {showGrid && (
                   <g data-ui-overlay="true" className="pointer-events-none opacity-25">
                     {Array.from({ length: Math.floor(canvasSize.width / 135) + 1 }).map(
@@ -2343,10 +2749,14 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                   </g>
                 )}
 
-                {/* Rendering Livelli Vettoriali ordinati per Z-Index */}
+                {/* Rendering Livelli Vettoriali e PNG ordinati per Z-Index */}
                 {sortedElements.map((el) => {
                   if (!el.visible) return null;
-                  const isSelected = el.id === selectedId;
+                  const isSelected = el.id === selectedId || selectedIds.includes(el.id);
+                  const isKeyObj =
+                    alignTargetMode === 'key-object' &&
+                    selectedIds.length > 1 &&
+                    (keyObjectId ? el.id === keyObjectId : el.id === selectedIds[0]);
                   const filterAttr = getFilterUrl(el.textureType);
 
                   const transforms: string[] = [];
@@ -2534,7 +2944,19 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                         </g>
                       )}
 
-                      {/* BOUNDING BOX ADOBE ILLUSTRATOR CON 8 MANIGLIE DI RIDIMENSIONAMENTO + MANIGLIA NODI DIRETTI (A) */}
+                      {/* Caso 4: Immagini PNG Caricate (Sezione Caricamenti Canva & File Logo Partner) */}
+                      {el.type === 'image' && el.imageUrl && (
+                        <image
+                          href={el.imageUrl}
+                          x={el.x - el.width / 2}
+                          y={el.y - el.height / 2}
+                          width={el.width}
+                          height={el.height}
+                          preserveAspectRatio="xMidYMid meet"
+                        />
+                      )}
+
+                      {/* BOUNDING BOX ADOBE ILLUSTRATOR CON 8 MANIGLIE + ANCORE E MANIGLIE DI BÉZIER (A) */}
                       {isSelected && (
                         <g data-ui-overlay="true">
                           <rect
@@ -2543,13 +2965,14 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                             width={el.width + 16}
                             height={el.height + 16}
                             fill="none"
-                            stroke="#0D66D0"
-                            strokeWidth={2.5}
+                            stroke={isKeyObj ? '#FF9A00' : '#0D66D0'}
+                            strokeWidth={isKeyObj ? 5 : 2.5}
                             strokeDasharray={activeTool === 'direct-select' ? '4 4' : undefined}
                           />
 
                           {/* 8 Maniglie di scala quando siamo nello strumento Selezione (V) */}
                           {activeTool === 'select' &&
+                            el.id === selectedId &&
                             !el.locked &&
                             ([
                               ['nw', el.x - el.width / 2 - 8, el.y - el.height / 2 - 8],
@@ -2591,8 +3014,103 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                               />
                             ))}
 
-                          {/* NODI DI ANCORAGGIO BÉZIER (Control Points) quando siamo in Selezione Diretta (A) */}
+                          {/* NODI DI ANCORAGGIO E MANIGLIE DIREZIONALI BÉZIER in Selezione Diretta (A) */}
                           {activeTool === 'direct-select' &&
+                            Array.isArray(el.bezierNodes) &&
+                            el.bezierNodes.length > 0 &&
+                            el.bezierNodes.map((node, nodeIdx) => {
+                              const isNodeSel = selectedNodeIndex === nodeIdx;
+                              return (
+                                <g key={`bnode-${nodeIdx}`}>
+                                  {/* Linea e Maniglia IN */}
+                                  <line
+                                    x1={node.x}
+                                    y1={node.y}
+                                    x2={node.inX}
+                                    y2={node.inY}
+                                    stroke="#FF9A00"
+                                    strokeWidth={2}
+                                  />
+                                  <circle
+                                    cx={node.inX}
+                                    cy={node.inY}
+                                    r={7}
+                                    fill="#FF9A00"
+                                    stroke="#FFFFFF"
+                                    strokeWidth={2}
+                                    className="cursor-move"
+                                    onPointerDown={(ev) => {
+                                      ev.stopPropagation();
+                                      setSelectedNodeIndex(nodeIdx);
+                                      setHistoryPast((past) => [...past.slice(-39), elements]);
+                                      setHistoryFuture([]);
+                                      isDraggingNodeRef.current = {
+                                        elementId: el.id,
+                                        nodeIndex: nodeIdx,
+                                        handleType: 'in',
+                                      };
+                                    }}
+                                  />
+
+                                  {/* Linea e Maniglia OUT */}
+                                  <line
+                                    x1={node.x}
+                                    y1={node.y}
+                                    x2={node.outX}
+                                    y2={node.outY}
+                                    stroke="#FF9A00"
+                                    strokeWidth={2}
+                                  />
+                                  <circle
+                                    cx={node.outX}
+                                    cy={node.outY}
+                                    r={7}
+                                    fill="#FF9A00"
+                                    stroke="#FFFFFF"
+                                    strokeWidth={2}
+                                    className="cursor-move"
+                                    onPointerDown={(ev) => {
+                                      ev.stopPropagation();
+                                      setSelectedNodeIndex(nodeIdx);
+                                      setHistoryPast((past) => [...past.slice(-39), elements]);
+                                      setHistoryFuture([]);
+                                      isDraggingNodeRef.current = {
+                                        elementId: el.id,
+                                        nodeIndex: nodeIdx,
+                                        handleType: 'out',
+                                      };
+                                    }}
+                                  />
+
+                                  {/* Punto di Ancoraggio Quadrato */}
+                                  <rect
+                                    x={node.x - 8}
+                                    y={node.y - 8}
+                                    width={16}
+                                    height={16}
+                                    fill={isNodeSel ? '#0D66D0' : '#FFFFFF'}
+                                    stroke="#0D66D0"
+                                    strokeWidth={3}
+                                    className="cursor-move"
+                                    onPointerDown={(ev) => {
+                                      ev.stopPropagation();
+                                      setSelectedNodeIndex(nodeIdx);
+                                      setHistoryPast((past) => [...past.slice(-39), elements]);
+                                      setHistoryFuture([]);
+                                      isDraggingNodeRef.current = {
+                                        elementId: el.id,
+                                        nodeIndex: nodeIdx,
+                                        handleType: 'anchor',
+                                      };
+                                    }}
+                                  />
+                                </g>
+                              );
+                            })}
+
+                          {/* Fallback ControlPoints standard quando l'elemento non ha bezierNodes */}
+                          {activeTool === 'direct-select' &&
+                            (!el.bezierNodes || el.bezierNodes.length === 0) &&
                             el.controlPoints &&
                             el.controlPoints.map((pt, nodeIdx) => {
                               const isNodeSel = selectedNodeIndex === nodeIdx;
@@ -2625,6 +3143,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                                       isDraggingNodeRef.current = {
                                         elementId: el.id,
                                         nodeIndex: nodeIdx,
+                                        handleType: 'anchor',
                                       };
                                     }}
                                   />
@@ -2636,6 +3155,21 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                     </g>
                   );
                 })}
+
+                {/* Contorno tratteggiato di Selezione Multipla (Shift+Clic) */}
+                {multiSelectionBounds && (
+                  <rect
+                    data-ui-overlay="true"
+                    x={multiSelectionBounds.left - 12}
+                    y={multiSelectionBounds.top - 12}
+                    width={multiSelectionBounds.width + 24}
+                    height={multiSelectionBounds.height + 24}
+                    fill="none"
+                    stroke="#3B9EFF"
+                    strokeWidth={2.5}
+                    strokeDasharray="10 6"
+                  />
+                )}
 
                 {/* ANTEPRIMA LIVE DURANTE IL DISEGNO (Macchia Blob col Cursore o Pennello Fluido) */}
                 {livePreviewData && livePreviewData.pathData && (
@@ -2668,34 +3202,63 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                   </g>
                 )}
 
-                {/* ANTEPRIMA TRACCIATO PENNA BÉZIER (P) IN CORSO */}
-                {activeTool === 'pen' && penDraftPoints.length > 0 && (
+                {/* ANTEPRIMA TRACCIATO PENNA DI BÉZIER (P) CON ANCORE E MANIGLIE DIREZIONALI IN TEMPO REALE */}
+                {activeTool === 'pen' && penDraftNodes.length > 0 && (
                   <g data-ui-overlay="true">
                     <path
-                      d={
-                        rebuildPathFromControlPoints(
-                          [...penDraftPoints, cursorCoords],
-                          false
-                        ).pathData
-                      }
+                      d={livePenPreviewPath}
                       fill={activeColor}
-                      fillOpacity={0.2}
+                      fillOpacity={0.18}
                       stroke="#0D66D0"
-                      strokeWidth={3}
+                      strokeWidth={3.5}
                       strokeDasharray="6 4"
                     />
-                    {penDraftPoints.map((pt, idx) => (
-                      <rect
-                        key={idx}
-                        x={pt.x - 7}
-                        y={pt.y - 7}
-                        width={14}
-                        height={14}
-                        fill={idx === 0 ? '#FF9A00' : '#FFFFFF'}
-                        stroke="#0D66D0"
-                        strokeWidth={3}
-                      />
-                    ))}
+                    {penDraftNodes.map((node, idx) => {
+                      const hasHandles =
+                        Math.hypot(node.outX - node.x, node.outY - node.y) > 1 ||
+                        Math.hypot(node.inX - node.x, node.inY - node.y) > 1;
+                      return (
+                        <g key={idx}>
+                          {hasHandles && (
+                            <>
+                              <line
+                                x1={node.inX}
+                                y1={node.inY}
+                                x2={node.outX}
+                                y2={node.outY}
+                                stroke="#FF9A00"
+                                strokeWidth={2.5}
+                              />
+                              <circle
+                                cx={node.inX}
+                                cy={node.inY}
+                                r={6}
+                                fill="#FF9A00"
+                                stroke="#FFFFFF"
+                                strokeWidth={2}
+                              />
+                              <circle
+                                cx={node.outX}
+                                cy={node.outY}
+                                r={6}
+                                fill="#FF9A00"
+                                stroke="#FFFFFF"
+                                strokeWidth={2}
+                              />
+                            </>
+                          )}
+                          <rect
+                            x={node.x - 7}
+                            y={node.y - 7}
+                            width={14}
+                            height={14}
+                            fill={idx === 0 ? '#FF9A00' : '#FFFFFF'}
+                            stroke="#0D66D0"
+                            strokeWidth={3}
+                          />
+                        </g>
+                      );
+                    })}
                   </g>
                 )}
 
@@ -2719,458 +3282,448 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
           </div>
         </div>
 
-        {/* 3. RIGHT DOCK STUDIO PANELS (Stile Adobe Illustrator: Carattere, Proprietà/Tracciati, Livelli) */}
+        {/* 3. RIGHT DOCK STUDIO PANELS (Allinea & Proprietà, Carattere, Caricamenti PNG, Livelli) */}
         <div
           data-testid="illustrator-right-dock"
-          className={`w-full lg:w-[370px] border-t lg:border-t-0 lg:border-l flex flex-col shrink-0 ${panelBg}`}
+          className={`w-full lg:w-[390px] border-t lg:border-t-0 lg:border-l flex flex-col shrink-0 ${panelBg}`}
         >
-          {/* Tab Header del Pannello Destro */}
-          <div className="grid grid-cols-3 border-b border-white/10 text-xs font-bold">
-            <button
-              type="button"
-              data-testid="tab-character-panel"
-              onClick={() => setRightDockTab('character')}
-              className={`py-2.5 px-2 flex items-center justify-center gap-1.5 border-b-2 transition-colors ${
-                rightDockTab === 'character'
-                  ? 'border-[#FF9A00] text-[#FF9A00] bg-white/5'
-                  : 'border-transparent opacity-70 hover:opacity-100'
-              }`}
-            >
-              <Type className="w-3.5 h-3.5" />
-              <span>Carattere</span>
-            </button>
+          {/* Tab Header del Pannello Destro (4 Tab: Allinea & Propr., Carattere, Caricamenti, Livelli) */}
+          <div className="grid grid-cols-4 border-b border-white/10 text-[11px] font-bold">
             <button
               type="button"
               data-testid="tab-properties-panel"
               onClick={() => setRightDockTab('properties')}
-              className={`py-2.5 px-2 flex items-center justify-center gap-1.5 border-b-2 transition-colors ${
+              className={`py-2.5 px-1.5 flex items-center justify-center gap-1 border-b-2 transition-colors ${
                 rightDockTab === 'properties'
                   ? 'border-[#FF9A00] text-[#FF9A00] bg-white/5'
                   : 'border-transparent opacity-70 hover:opacity-100'
               }`}
             >
-              <Combine className="w-3.5 h-3.5" />
-              <span>Proprietà &amp; Blob</span>
+              <Combine className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Allinea</span>
+            </button>
+            <button
+              type="button"
+              data-testid="tab-character-panel"
+              onClick={() => setRightDockTab('character')}
+              className={`py-2.5 px-1.5 flex items-center justify-center gap-1 border-b-2 transition-colors ${
+                rightDockTab === 'character'
+                  ? 'border-[#FF9A00] text-[#FF9A00] bg-white/5'
+                  : 'border-transparent opacity-70 hover:opacity-100'
+              }`}
+            >
+              <Type className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Carattere</span>
+            </button>
+            <button
+              type="button"
+              data-testid="tab-uploads-panel"
+              onClick={() => setRightDockTab('uploads')}
+              className={`py-2.5 px-1.5 flex items-center justify-center gap-1 border-b-2 transition-colors ${
+                rightDockTab === 'uploads'
+                  ? 'border-[#FF9A00] text-[#FF9A00] bg-white/5'
+                  : 'border-transparent opacity-70 hover:opacity-100'
+              }`}
+            >
+              <ImagePlus className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Caricamenti</span>
             </button>
             <button
               type="button"
               data-testid="tab-layers-panel"
               onClick={() => setRightDockTab('layers')}
-              className={`py-2.5 px-2 flex items-center justify-center gap-1.5 border-b-2 transition-colors ${
+              className={`py-2.5 px-1.5 flex items-center justify-center gap-1 border-b-2 transition-colors ${
                 rightDockTab === 'layers'
                   ? 'border-[#FF9A00] text-[#FF9A00] bg-white/5'
                   : 'border-transparent opacity-70 hover:opacity-100'
               }`}
             >
-              <Layers className="w-3.5 h-3.5" />
-              <span>Livelli ({elements.length})</span>
+              <Layers className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Livelli ({elements.length})</span>
             </button>
           </div>
 
           {/* Contenuto Scrollabile del Pannello Attivo */}
-          <div className="p-4 space-y-4 overflow-y-auto max-h-[680px]">
-            {/* ==================== TAB 1: CARATTERE & CASELLA DI TESTO (SOLO MONTSERRAT E AKENA OTOS) ==================== */}
-            {rightDockTab === 'character' && (
-              <div data-testid="character-studio-panel" className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-[#FF9A00]">
-                      Caselle di Testo &amp; Tipografia
-                    </h3>
-                    <p className={`text-[11px] ${mutedText}`}>
-                      Due sole famiglie ufficiali: Montserrat &amp; Akena Otos
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    data-testid="add-textbox-btn"
-                    onClick={() =>
-                      createNewTextBoxAt(
-                        Math.round(canvasSize.width / 2),
-                        Math.round(canvasSize.height / 2),
-                        540
-                      )
-                    }
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0D66D0] text-white text-xs font-bold hover:bg-[#0952a8] transition-colors shadow"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>+ Casella di Testo</span>
-                  </button>
-                </div>
-
-                {/* Selettore Esclusivo delle 2 Famiglie Font: Montserrat vs Akena Otos */}
-                <div className="space-y-2">
-                  <span className="block text-[11px] font-bold uppercase tracking-wider opacity-80">
-                    1. Famiglia Font (Esclusiva 2 Font)
-                  </span>
-                  <div className="grid grid-cols-2 gap-2">
-                    {BUILDER_FONT_FAMILIES.map((fam) => {
-                      const currentFam =
-                        selectedElement?.type === 'textured-text' && selectedElement.fontFamily
-                          ? selectedElement.fontFamily
-                          : activeFontFamily;
-                      const isSel = currentFam === fam.id;
-                      return (
-                        <button
-                          key={fam.id}
-                          type="button"
-                          data-testid={`font-family-btn-${fam.id === 'Montserrat' ? 'montserrat' : 'akena'}`}
-                          onClick={() => {
-                            setActiveFontFamily(fam.id);
-                            if (selectedElement?.type === 'textured-text') {
-                              updateSelectedTextProperty({
-                                fontFamily: fam.id,
-                                fontStyle:
-                                  fam.id === 'Akena Otos' ? 'editorial-serif' : 'craft-rounded',
-                              });
-                            }
-                          }}
-                          className={`p-2.5 rounded-lg border text-left transition-all ${
-                            isSel
-                              ? 'bg-[#0D66D0] text-white border-[#3B9EFF] shadow'
-                              : `${inputBg} hover:opacity-90`
-                          }`}
-                        >
-                          <div
-                            className="text-sm font-bold truncate"
-                            style={{
-                              fontFamily:
-                                fam.id === 'Montserrat'
-                                  ? '"Montserrat", sans-serif'
-                                  : '"Akena Otos", "Fraunces", Georgia, serif',
-                            }}
-                          >
-                            {fam.label}
-                          </div>
-                          <div className="text-[10px] opacity-80 leading-tight mt-0.5">
-                            18 Declinazioni
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Selettore Tutte le 18 Declinazioni (100 Thin .. 900 Black, Normale & Italic) */}
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor="font-declination-select"
-                    className="block text-[11px] font-bold uppercase tracking-wider opacity-80"
-                  >
-                    2. Declinazione ({activeFontFamily} · 18 Varianti)
-                  </label>
-                  <select
-                    id="font-declination-select"
-                    data-testid="font-declination-select"
-                    value={
-                      selectedElement?.type === 'textured-text' && selectedElement.fontWeight
-                        ? `${selectedElement.fontWeight}-${
-                            selectedElement.fontItalic ? 'italic' : 'normal'
-                          }`
-                        : `${activeFontWeight}-${activeFontItalic ? 'italic' : 'normal'}`
-                    }
-                    onChange={(e) => {
-                      const found = FONT_DECLINATIONS.find((d) => d.id === e.target.value);
-                      if (!found) return;
-                      setActiveFontWeight(found.weight);
-                      setActiveFontItalic(found.italic);
-                      if (selectedElement?.type === 'textured-text') {
-                        updateSelectedTextProperty({
-                          fontFamily: selectedElement.fontFamily || activeFontFamily,
-                          fontWeight: found.weight,
-                          fontItalic: found.italic,
-                        });
-                      }
-                    }}
-                    className={`w-full px-3 py-2 rounded-lg border text-xs font-semibold ${inputBg}`}
-                  >
-                    {FONT_DECLINATIONS.map((decl) => (
-                      <option
-                        key={decl.id}
-                        value={decl.id}
-                        className="bg-[#252526] text-white"
-                      >
-                        {activeFontFamily} — {decl.label}
-                      </option>
-                    ))}
-                  </select>
-
-                  {/* Griglia Rapida Pesi 100–900 + Toggle Italic */}
-                  <div className="grid grid-cols-5 gap-1 pt-1">
-                    {([100, 200, 300, 400, 500, 600, 700, 800, 900] as BuilderFontWeight[]).map(
-                      (w) => {
-                        const curW =
-                          selectedElement?.type === 'textured-text' && selectedElement.fontWeight
-                            ? selectedElement.fontWeight
-                            : activeFontWeight;
-                        return (
-                          <button
-                            key={w}
-                            type="button"
-                            onClick={() => {
-                              setActiveFontWeight(w);
-                              if (selectedElement?.type === 'textured-text') {
-                                updateSelectedTextProperty({
-                                  fontFamily: selectedElement.fontFamily || activeFontFamily,
-                                  fontWeight: w,
-                                });
-                              }
-                            }}
-                            className={`py-1 rounded text-[11px] font-mono font-semibold border ${
-                              curW === w
-                                ? 'bg-[#FF9A00] text-black border-[#FF9A00]'
-                                : `${inputBg} opacity-80 hover:opacity-100`
-                            }`}
-                          >
-                            {w}
-                          </button>
-                        );
-                      }
-                    )}
-                    <button
-                      type="button"
-                      data-testid="font-italic-toggle"
-                      onClick={() => {
-                        const nextIt =
-                          selectedElement?.type === 'textured-text'
-                            ? !selectedElement.fontItalic
-                            : !activeFontItalic;
-                        setActiveFontItalic(nextIt);
-                        if (selectedElement?.type === 'textured-text') {
-                          updateSelectedTextProperty({
-                            fontFamily: selectedElement.fontFamily || activeFontFamily,
-                            fontItalic: nextIt,
-                          });
-                        }
-                      }}
-                      className={`py-1 rounded text-[11px] italic font-serif font-bold border ${
-                        (
-                          selectedElement?.type === 'textured-text'
-                            ? selectedElement.fontItalic
-                            : activeFontItalic
-                        )
-                          ? 'bg-[#FF9A00] text-black border-[#FF9A00]'
-                          : `${inputBg} opacity-80 hover:opacity-100`
-                      }`}
-                    >
-                      Italic
-                    </button>
-                  </div>
-                </div>
-
-                {/* Caricamento File Font Originale (.OTF / .TTF / .WOFF2) per Akena Otos o Montserrat */}
-                <div className={`p-2.5 rounded-lg border space-y-1.5 ${inputBg}`}>
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold">
-                      File Font {activeFontFamily} (.OTF / .TTF)
-                    </span>
-                    {customLoadedFonts[activeFontFamily] ? (
-                      <span className="flex items-center gap-1 text-[10px] text-[#4A6B53] font-semibold">
-                        <Check className="w-3 h-3" />
-                        {customLoadedFonts[activeFontFamily]}
-                      </span>
-                    ) : (
-                      <span className={`text-[10px] ${mutedText}`}>Predefinito integrato</span>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => fontFileInputRef.current?.click()}
-                    className="w-full py-1.5 px-2.5 rounded bg-white/10 hover:bg-white/15 border border-white/15 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors"
-                  >
-                    <Upload className="w-3.5 h-3.5 text-[#FF9A00]" />
-                    <span>Carica file .OTF / .TTF per {activeFontFamily}</span>
-                  </button>
-                </div>
-
-                {/* Editor Testo Contenuto Casella */}
-                {selectedElement?.type === 'textured-text' && !selectedElement.isHandDrawnText ? (
-                  <div className="space-y-3 pt-2 border-t border-white/10">
-                    <div>
-                      <label
-                        htmlFor="textbox-content-textarea"
-                        className="block text-[11px] font-bold uppercase tracking-wider mb-1"
-                      >
-                        Testo della Casella Selezionata
-                      </label>
-                      <textarea
-                        id="textbox-content-textarea"
-                        data-testid="textbox-content-textarea"
-                        rows={3}
-                        value={selectedElement.textContent || ''}
-                        onChange={(e) =>
-                          updateSelectedTextProperty({ textContent: e.target.value })
-                        }
-                        className={`w-full px-2.5 py-2 text-xs rounded-lg border ${inputBg}`}
-                      />
-                    </div>
-
-                    {/* Controlli Parametrici Adobe Illustrator Character Panel */}
-                    <div className="grid grid-cols-2 gap-2.5">
-                      <div>
-                        <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
-                          Corpo Font ({selectedElement.fontSize || 48} pt)
-                        </label>
-                        <input
-                          type="number"
-                          min={12}
-                          max={220}
-                          value={selectedElement.fontSize || 48}
-                          onChange={(e) => {
-                            const v = Math.max(12, Number(e.target.value) || 48);
-                            setActiveFontSize(v);
-                            updateSelectedTextProperty({ fontSize: v });
-                          }}
-                          className={`w-full px-2.5 py-1.5 rounded border text-xs font-mono ${inputBg}`}
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
-                          Larghezza Box ({selectedElement.textBoxWidth || selectedElement.width} px)
-                        </label>
-                        <input
-                          type="number"
-                          min={160}
-                          max={1040}
-                          step={20}
-                          value={selectedElement.textBoxWidth || selectedElement.width || 520}
-                          onChange={(e) => {
-                            const w = Math.max(160, Number(e.target.value) || 520);
-                            updateSelectedTextProperty({ textBoxWidth: w });
-                          }}
-                          className={`w-full px-2.5 py-1.5 rounded border text-xs font-mono ${inputBg}`}
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
-                          Interlinea ({(selectedElement.lineHeight || 1.2).toFixed(2)})
-                        </label>
-                        <input
-                          type="range"
-                          min={0.85}
-                          max={2.2}
-                          step={0.05}
-                          value={selectedElement.lineHeight || 1.2}
-                          onChange={(e) => {
-                            const lh = Number(e.target.value);
-                            setActiveLineHeight(lh);
-                            updateSelectedTextProperty({ lineHeight: lh });
-                          }}
-                          className="w-full accent-[#FF9A00]"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
-                          Tracking ({Math.round((selectedElement.letterSpacing || 0) * 1000)})
-                        </label>
-                        <input
-                          type="range"
-                          min={-0.06}
-                          max={0.35}
-                          step={0.01}
-                          value={selectedElement.letterSpacing || 0}
-                          onChange={(e) => {
-                            const ls = Number(e.target.value);
-                            setActiveLetterSpacing(ls);
-                            updateSelectedTextProperty({ letterSpacing: ls });
-                          }}
-                          className="w-full accent-[#FF9A00]"
-                        />
-                      </div>
-                    </div>
-
-                    {/* Allineamento Paragrafo & Trasformazione Maiuscole/Minuscole */}
-                    <div className="flex items-center justify-between gap-2">
-                      <div className={`flex items-center rounded border p-0.5 ${inputBg}`}>
-                        <button
-                          type="button"
-                          onClick={() => updateSelectedTextProperty({ textAlign: 'left' })}
-                          title="Allinea testo a sinistra"
-                          className={`p-1.5 rounded ${
-                            selectedElement.textAlign === 'left'
-                              ? 'bg-[#0D66D0] text-white'
-                              : 'hover:bg-white/10'
-                          }`}
-                        >
-                          <AlignLeft className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => updateSelectedTextProperty({ textAlign: 'center' })}
-                          title="Centra testo"
-                          className={`p-1.5 rounded ${
-                            (selectedElement.textAlign || 'center') === 'center'
-                              ? 'bg-[#0D66D0] text-white'
-                              : 'hover:bg-white/10'
-                          }`}
-                        >
-                          <AlignCenter className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => updateSelectedTextProperty({ textAlign: 'right' })}
-                          title="Allinea testo a destra"
-                          className={`p-1.5 rounded ${
-                            selectedElement.textAlign === 'right'
-                              ? 'bg-[#0D66D0] text-white'
-                              : 'hover:bg-white/10'
-                          }`}
-                        >
-                          <AlignRight className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-
-                      <div className={`flex items-center rounded border p-0.5 text-[11px] font-mono ${inputBg}`}>
-                        <button
-                          type="button"
-                          onClick={() => updateSelectedTextProperty({ textTransform: 'none' })}
-                          className={`px-2 py-1 rounded ${
-                            (selectedElement.textTransform || 'none') === 'none'
-                              ? 'bg-[#0D66D0] text-white'
-                              : ''
-                          }`}
-                        >
-                          Aa
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => updateSelectedTextProperty({ textTransform: 'uppercase' })}
-                          className={`px-2 py-1 rounded ${
-                            selectedElement.textTransform === 'uppercase'
-                              ? 'bg-[#0D66D0] text-white'
-                              : ''
-                          }`}
-                        >
-                          AA
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => updateSelectedTextProperty({ textTransform: 'lowercase' })}
-                          className={`px-2 py-1 rounded ${
-                            selectedElement.textTransform === 'lowercase'
-                              ? 'bg-[#0D66D0] text-white'
-                              : ''
-                          }`}
-                        >
-                          aa
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className={`p-3 rounded-lg border text-xs ${inputBg}`}>
-                    Seleziona un livello di testo sulla tavola oppure clicca{' '}
-                    <strong>&ldquo;+ Casella di Testo&rdquo;</strong> (tasto{' '}
-                    <kbd className="px-1.5 py-0.5 rounded bg-black/30 font-mono">T</kbd>) per
-                    scrivere con <strong>Montserrat</strong> o <strong>Akena Otos</strong>.
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ==================== TAB 2: PROPRIETÀ, MACCHIA BLOB COL CURSORE & PATHFINDER ==================== */}
+          <div
+            className={`p-4 space-y-4 overflow-y-auto ${
+              isFullscreen ? 'flex-1' : 'max-h-[700px]'
+            }`}
+          >
+            {/* ==================== TAB 1: PANNELLO "ALLINEA" DI ADOBE ILLUSTRATOR + PROPRIETÀ & BLOB ==================== */}
             {rightDockTab === 'properties' && (
               <div data-testid="properties-studio-panel" className="space-y-4">
+                {/* PANNELLO ALLINEA FEDELE ALLA FOTO DI ADOBE ILLUSTRATOR */}
+                <div
+                  data-testid="illustrator-align-panel"
+                  className="rounded-lg bg-[#383838] text-[#E8E8E8] border border-[#222222] shadow-lg overflow-hidden"
+                >
+                  {/* Barra Titolo "Allinea" */}
+                  <div className="px-3 py-2 bg-[#424242] border-b border-[#2A2A2A] flex items-center justify-between">
+                    <span className="text-xs font-semibold tracking-wide text-[#F0F0F0]">
+                      Allinea
+                    </span>
+                    <span className="text-[10px] text-[#BDBDBD]">
+                      {selectedIds.length > 1
+                        ? `${selectedIds.length} oggetti selezionati`
+                        : selectedId
+                        ? '1 oggetto selezionato'
+                        : 'Shift+Clic per multi-selezione'}
+                    </span>
+                  </div>
+
+                  <div className="p-3 space-y-3">
+                    {/* 1. Allinea oggetti (7 icone come nello screenshot) */}
+                    <div>
+                      <div className="text-[11px] font-medium text-[#D6D6D6] mb-1.5">
+                        Allinea oggetti:
+                      </div>
+                      <div className="grid grid-cols-7 gap-1">
+                        {/* 1. Allinea a sinistra */}
+                        <button
+                          type="button"
+                          data-testid="align-btn-left"
+                          onClick={() => executeIllustratorAlign('align-left')}
+                          title="Allinea a sinistra"
+                          className="h-8 rounded bg-[#4A4A4A] hover:bg-[#5A5A5A] active:bg-[#0D66D0] flex items-center justify-center transition-colors"
+                        >
+                          <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                            <rect x="2" y="2" width="1.8" height="16" />
+                            <rect x="5.5" y="4.5" width="7.5" height="4" />
+                            <rect x="5.5" y="11" width="11.5" height="4" />
+                          </svg>
+                        </button>
+
+                        {/* 2. Allinea al centro orizzontale */}
+                        <button
+                          type="button"
+                          data-testid="align-btn-center-h"
+                          onClick={() => executeIllustratorAlign('align-center-h')}
+                          title="Allinea al centro orizzontale"
+                          className="h-8 rounded bg-[#4A4A4A] hover:bg-[#5A5A5A] active:bg-[#0D66D0] flex items-center justify-center transition-colors"
+                        >
+                          <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                            <rect x="9.1" y="2" width="1.8" height="16" />
+                            <rect x="5.5" y="4.5" width="9" height="4" />
+                            <rect x="3.5" y="11" width="13" height="4" />
+                          </svg>
+                        </button>
+
+                        {/* 3. Allinea a destra */}
+                        <button
+                          type="button"
+                          data-testid="align-btn-right"
+                          onClick={() => executeIllustratorAlign('align-right')}
+                          title="Allinea a destra"
+                          className="h-8 rounded bg-[#4A4A4A] hover:bg-[#5A5A5A] active:bg-[#0D66D0] flex items-center justify-center transition-colors"
+                        >
+                          <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                            <rect x="16.2" y="2" width="1.8" height="16" />
+                            <rect x="7" y="4.5" width="7.5" height="4" />
+                            <rect x="3" y="11" width="11.5" height="4" />
+                          </svg>
+                        </button>
+
+                        {/* 4. Allinea al centro assoluto (Croce centrale come nella foto) */}
+                        <button
+                          type="button"
+                          data-testid="align-btn-center-both"
+                          onClick={() => executeIllustratorAlign('align-center-both')}
+                          title="Allinea al centro assoluto della tavola/selezione"
+                          className="h-8 rounded bg-[#4A4A4A] hover:bg-[#5A5A5A] active:bg-[#0D66D0] flex items-center justify-center transition-colors"
+                        >
+                          <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                            <rect x="9.2" y="2" width="1.6" height="16" />
+                            <rect x="2" y="9.2" width="16" height="1.6" />
+                            <rect x="5.5" y="6" width="9" height="8" />
+                          </svg>
+                        </button>
+
+                        {/* 5. Allinea in alto */}
+                        <button
+                          type="button"
+                          data-testid="align-btn-top"
+                          onClick={() => executeIllustratorAlign('align-top')}
+                          title="Allinea in alto"
+                          className="h-8 rounded bg-[#4A4A4A] hover:bg-[#5A5A5A] active:bg-[#0D66D0] flex items-center justify-center transition-colors"
+                        >
+                          <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                            <rect x="2" y="2" width="16" height="1.8" />
+                            <rect x="4.5" y="5.5" width="4" height="11" />
+                            <rect x="11" y="5.5" width="4" height="7.5" />
+                          </svg>
+                        </button>
+
+                        {/* 6. Allinea al centro verticale */}
+                        <button
+                          type="button"
+                          data-testid="align-btn-center-v"
+                          onClick={() => executeIllustratorAlign('align-center-v')}
+                          title="Allinea al centro verticale"
+                          className="h-8 rounded bg-[#4A4A4A] hover:bg-[#5A5A5A] active:bg-[#0D66D0] flex items-center justify-center transition-colors"
+                        >
+                          <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                            <rect x="2" y="9.1" width="16" height="1.8" />
+                            <rect x="4.5" y="3.5" width="4" height="13" />
+                            <rect x="11" y="5.5" width="4" height="9" />
+                          </svg>
+                        </button>
+
+                        {/* 7. Allinea in basso */}
+                        <button
+                          type="button"
+                          data-testid="align-btn-bottom"
+                          onClick={() => executeIllustratorAlign('align-bottom')}
+                          title="Allinea in basso"
+                          className="h-8 rounded bg-[#4A4A4A] hover:bg-[#5A5A5A] active:bg-[#0D66D0] flex items-center justify-center transition-colors"
+                        >
+                          <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                            <rect x="2" y="16.2" width="16" height="1.8" />
+                            <rect x="4.5" y="3.5" width="4" height="11" />
+                            <rect x="11" y="7" width="4" height="7.5" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 2. Distribuisci oggetti (6 icone come nello screenshot) */}
+                    <div className="pt-2 border-t border-[#4B4B4B]">
+                      <div className="text-[11px] font-medium text-[#D6D6D6] mb-1.5">
+                        Distribuisci oggetti:
+                      </div>
+                      <div className="grid grid-cols-6 gap-1.5">
+                        {/* Distribuisci in alto */}
+                        <button
+                          type="button"
+                          data-testid="distribute-btn-top"
+                          onClick={() => executeIllustratorAlign('distribute-top')}
+                          title="Distribuisci in alto"
+                          className="h-8 rounded bg-[#4A4A4A] hover:bg-[#5A5A5A] active:bg-[#0D66D0] flex items-center justify-center transition-colors"
+                        >
+                          <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                            <rect x="2" y="3" width="16" height="1.4" />
+                            <rect x="6" y="4.8" width="8" height="3.2" />
+                            <rect x="2" y="11" width="16" height="1.4" />
+                            <rect x="4.5" y="12.8" width="11" height="3.8" />
+                          </svg>
+                        </button>
+
+                        {/* Distribuisci al centro verticale */}
+                        <button
+                          type="button"
+                          data-testid="distribute-btn-center-v"
+                          onClick={() => executeIllustratorAlign('distribute-center-v')}
+                          title="Distribuisci al centro verticale"
+                          className="h-8 rounded bg-[#4A4A4A] hover:bg-[#5A5A5A] active:bg-[#0D66D0] flex items-center justify-center transition-colors"
+                        >
+                          <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                            <rect x="2" y="5.3" width="16" height="1.4" />
+                            <rect x="6" y="3.8" width="8" height="4.4" />
+                            <rect x="2" y="13.3" width="16" height="1.4" />
+                            <rect x="4.5" y="11.8" width="11" height="4.4" />
+                          </svg>
+                        </button>
+
+                        {/* Distribuisci in basso */}
+                        <button
+                          type="button"
+                          data-testid="distribute-btn-bottom"
+                          onClick={() => executeIllustratorAlign('distribute-bottom')}
+                          title="Distribuisci in basso"
+                          className="h-8 rounded bg-[#4A4A4A] hover:bg-[#5A5A5A] active:bg-[#0D66D0] flex items-center justify-center transition-colors"
+                        >
+                          <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                            <rect x="6" y="3.2" width="8" height="3.5" />
+                            <rect x="2" y="7.2" width="16" height="1.4" />
+                            <rect x="4.5" y="11.5" width="11" height="3.8" />
+                            <rect x="2" y="15.8" width="16" height="1.4" />
+                          </svg>
+                        </button>
+
+                        {/* Distribuisci a sinistra */}
+                        <button
+                          type="button"
+                          data-testid="distribute-btn-left"
+                          onClick={() => executeIllustratorAlign('distribute-left')}
+                          title="Distribuisci a sinistra"
+                          className="h-8 rounded bg-[#4A4A4A] hover:bg-[#5A5A5A] active:bg-[#0D66D0] flex items-center justify-center transition-colors"
+                        >
+                          <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                            <rect x="3" y="2" width="1.4" height="16" />
+                            <rect x="4.8" y="4.5" width="3.5" height="11" />
+                            <rect x="11" y="2" width="1.4" height="16" />
+                            <rect x="12.8" y="6" width="3.5" height="8" />
+                          </svg>
+                        </button>
+
+                        {/* Distribuisci al centro orizzontale */}
+                        <button
+                          type="button"
+                          data-testid="distribute-btn-center-h"
+                          onClick={() => executeIllustratorAlign('distribute-center-h')}
+                          title="Distribuisci al centro orizzontale"
+                          className="h-8 rounded bg-[#4A4A4A] hover:bg-[#5A5A5A] active:bg-[#0D66D0] flex items-center justify-center transition-colors"
+                        >
+                          <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                            <rect x="5.3" y="2" width="1.4" height="16" />
+                            <rect x="3.8" y="4.5" width="4.4" height="11" />
+                            <rect x="13.3" y="2" width="1.4" height="16" />
+                            <rect x="11.8" y="6" width="4.4" height="8" />
+                          </svg>
+                        </button>
+
+                        {/* Distribuisci a destra */}
+                        <button
+                          type="button"
+                          data-testid="distribute-btn-right"
+                          onClick={() => executeIllustratorAlign('distribute-right')}
+                          title="Distribuisci a destra"
+                          className="h-8 rounded bg-[#4A4A4A] hover:bg-[#5A5A5A] active:bg-[#0D66D0] flex items-center justify-center transition-colors"
+                        >
+                          <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                            <rect x="3.5" y="4.5" width="3.5" height="11" />
+                            <rect x="7.5" y="2" width="1.4" height="16" />
+                            <rect x="11.8" y="6" width="3.5" height="8" />
+                            <rect x="15.8" y="2" width="1.4" height="16" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 3. Riga Inferiore: "Distribuisci spaziatura:" (Sinistra) | "Allinea a:" (Destra) */}
+                    <div className="pt-2 border-t border-[#4B4B4B] grid grid-cols-12 gap-2 items-end">
+                      {/* Distribuisci spaziatura */}
+                      <div className="col-span-7 space-y-1.5 pr-2 border-r border-[#4B4B4B]">
+                        <div className="text-[11px] font-medium text-[#D6D6D6]">
+                          Distribuisci spaziatura:
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            data-testid="distribute-spacing-v-btn"
+                            onClick={() => executeIllustratorAlign('distribute-spacing-v')}
+                            title="Distribuisci spaziatura verticale"
+                            className="w-8 h-8 rounded bg-[#4A4A4A] hover:bg-[#5A5A5A] active:bg-[#0D66D0] flex items-center justify-center shrink-0"
+                          >
+                            <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                              <rect x="6" y="2.5" width="11" height="4.5" />
+                              <rect x="6" y="13" width="11" height="4.5" />
+                              <rect x="2" y="7" width="3" height="1.2" />
+                              <rect x="2" y="11.8" width="3" height="1.2" />
+                              <rect x="2.9" y="7" width="1.2" height="6" />
+                            </svg>
+                          </button>
+
+                          <button
+                            type="button"
+                            data-testid="distribute-spacing-h-btn"
+                            onClick={() => executeIllustratorAlign('distribute-spacing-h')}
+                            title="Distribuisci spaziatura orizzontale"
+                            className="w-8 h-8 rounded bg-[#4A4A4A] hover:bg-[#5A5A5A] active:bg-[#0D66D0] flex items-center justify-center shrink-0"
+                          >
+                            <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                              <rect x="2.5" y="6" width="4.5" height="11" />
+                              <rect x="13" y="6" width="4.5" height="11" />
+                              <rect x="7" y="2" width="1.2" height="3" />
+                              <rect x="11.8" y="2" width="1.2" height="3" />
+                              <rect x="7" y="2.9" width="6" height="1.2" />
+                            </svg>
+                          </button>
+
+                          <div className="flex items-center bg-[#2B2B2B] border border-[#555555] rounded px-1.5 h-8 flex-1 min-w-0">
+                            <input
+                              type="number"
+                              data-testid="distribute-spacing-input"
+                              value={distributeSpacingValue}
+                              onChange={(e) =>
+                                setDistributeSpacingValue(Number(e.target.value) || 0)
+                              }
+                              aria-label="Valore spaziatura distribuzione"
+                              className="w-full bg-transparent text-xs font-mono text-[#E8E8E8] focus:outline-none"
+                            />
+                            <span className="text-[10px] font-mono text-[#9E9E9E] ml-0.5">
+                              mm
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Allinea a: (Tavola da disegno | Selezione | Oggetto chiave) */}
+                      <div className="col-span-5 space-y-1.5 pl-1">
+                        <div className="text-[11px] font-medium text-[#D6D6D6]">Allinea a:</div>
+                        <div className="grid grid-cols-3 gap-1">
+                          {/* Allinea a tavola da disegno */}
+                          <button
+                            type="button"
+                            data-testid="align-target-artboard"
+                            onClick={() => setAlignTargetMode('artboard')}
+                            title="Allinea a tavola da disegno"
+                            className={`h-8 rounded flex items-center justify-center border transition-colors ${
+                              alignTargetMode === 'artboard'
+                                ? 'bg-[#222222] border-[#FF9A00] text-white'
+                                : 'bg-[#4A4A4A] border-transparent text-[#CCCCCC] hover:bg-[#5A5A5A]'
+                            }`}
+                          >
+                            <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                              <path d="M4 4 H13 L16 7 V16 H4 Z M5.5 5.5 V14.5 H14.5 V8 H12 V5.5 Z" />
+                              <rect x="2" y="2" width="2" height="2" />
+                            </svg>
+                          </button>
+
+                          {/* Allinea a selezione */}
+                          <button
+                            type="button"
+                            data-testid="align-target-selection"
+                            onClick={() => setAlignTargetMode('selection')}
+                            title="Allinea a selezione (usa Shift+Clic per selezionare più oggetti)"
+                            className={`h-8 rounded flex items-center justify-center border transition-colors ${
+                              alignTargetMode === 'selection'
+                                ? 'bg-[#222222] border-[#FF9A00] text-white'
+                                : 'bg-[#4A4A4A] border-transparent text-[#CCCCCC] hover:bg-[#5A5A5A]'
+                            }`}
+                          >
+                            <svg viewBox="0 0 20 20" className="w-4 h-4 fill-current">
+                              <rect
+                                x="4"
+                                y="4"
+                                width="12"
+                                height="12"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="1.6"
+                                strokeDasharray="2.5 2"
+                              />
+                              <rect x="3" y="3" width="2.4" height="2.4" />
+                              <rect x="14.6" y="3" width="2.4" height="2.4" />
+                              <rect x="3" y="14.6" width="2.4" height="2.4" />
+                              <rect x="14.6" y="14.6" width="2.4" height="2.4" />
+                            </svg>
+                          </button>
+
+                          {/* Allinea a oggetto chiave */}
+                          <button
+                            type="button"
+                            data-testid="align-target-key-object"
+                            onClick={() => {
+                              setAlignTargetMode('key-object');
+                              if (!keyObjectId && selectedId) {
+                                setKeyObjectId(selectedId);
+                              }
+                            }}
+                            title="Allinea a oggetto chiave"
+                            className={`h-8 rounded flex items-center justify-center border transition-colors ${
+                              alignTargetMode === 'key-object'
+                                ? 'bg-[#222222] border-[#FF9A00] text-white'
+                                : 'bg-[#4A4A4A] border-transparent text-[#CCCCCC] hover:bg-[#5A5A5A]'
+                            }`}
+                          >
+                            <KeyRound className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
                 {/* Box Dedicato: Impostazioni Macchia Blob col Cursore */}
                 <div className={`p-3 rounded-lg border space-y-2.5 ${inputBg}`}>
                   <div className="flex items-center justify-between">
@@ -3190,9 +3743,6 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                       {activeTool === 'blob' ? 'Strumento Attivo' : 'Attiva Ora'}
                     </button>
                   </div>
-                  <p className={`text-[11px] leading-snug ${mutedText}`}>
-                    Disegna qualsiasi contorno col cursore senza vincolo di rettangolo:
-                  </p>
                   <div className="grid grid-cols-2 gap-1.5">
                     <button
                       type="button"
@@ -3473,7 +4023,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                             commitElementsChange((prev) =>
                               prev.filter((el) => el.id !== selectedElement.id)
                             );
-                            setSelectedId(null);
+                            selectSingleElement(null);
                           }}
                           title="Elimina livello"
                           className="p-1.5 rounded bg-[#B85B43]/20 text-[#B85B43] hover:bg-[#B85B43] hover:text-white"
@@ -3496,7 +4046,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                             commitElementsChange((prev) =>
                               prev.map((el) =>
                                 el.id === selectedElement.id
-                                  ? translateVectorElement(el, dx, 0)
+                                  ? translateVectorElementByDelta(el, dx, 0)
                                   : el
                               )
                             );
@@ -3515,7 +4065,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                             commitElementsChange((prev) =>
                               prev.map((el) =>
                                 el.id === selectedElement.id
-                                  ? translateVectorElement(el, 0, dy)
+                                  ? translateVectorElementByDelta(el, 0, dy)
                                   : el
                               )
                             );
@@ -3578,7 +4128,7 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                         className="py-1.5 px-2 rounded bg-[#B85B43]/20 border border-[#B85B43]/50 text-[11px] font-semibold flex items-center justify-center gap-1 hover:bg-[#B85B43] hover:text-white transition-colors"
                       >
                         <Crosshair className="w-3.5 h-3.5" />
-                        <span>Converti in Nodi Blob</span>
+                        <span>Converti in Maniglie Bézier</span>
                       </button>
                     </div>
                   </div>
@@ -3636,20 +4186,563 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
               </div>
             )}
 
-            {/* ==================== TAB 3: LIVELLI Z-INDEX, PARTNER KIT & CLIPBOARD ==================== */}
+            {/* ==================== TAB 2: CARATTERE & CASELLA DI TESTO (SOLO MONTSERRAT E AKENA OTOS) ==================== */}
+            {rightDockTab === 'character' && (
+              <div data-testid="character-studio-panel" className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-[#FF9A00]">
+                      Caselle di Testo &amp; Tipografia
+                    </h3>
+                    <p className={`text-[11px] ${mutedText}`}>
+                      Due sole famiglie ufficiali: Montserrat &amp; Akena Otos
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    data-testid="add-textbox-btn"
+                    onClick={() =>
+                      createNewTextBoxAt(
+                        Math.round(canvasSize.width / 2),
+                        Math.round(canvasSize.height / 2),
+                        540
+                      )
+                    }
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0D66D0] text-white text-xs font-bold hover:bg-[#0952a8] transition-colors shadow"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>+ Casella di Testo</span>
+                  </button>
+                </div>
+
+                {/* Selettore Esclusivo delle 2 Famiglie Font: Montserrat vs Akena Otos */}
+                <div className="space-y-2">
+                  <span className="block text-[11px] font-bold uppercase tracking-wider opacity-80">
+                    1. Famiglia Font (Esclusiva 2 Font)
+                  </span>
+                  <div className="grid grid-cols-2 gap-2">
+                    {BUILDER_FONT_FAMILIES.map((fam) => {
+                      const currentFam =
+                        selectedElement?.type === 'textured-text' && selectedElement.fontFamily
+                          ? selectedElement.fontFamily
+                          : activeFontFamily;
+                      const isSel = currentFam === fam.id;
+                      return (
+                        <button
+                          key={fam.id}
+                          type="button"
+                          data-testid={`font-family-btn-${fam.id === 'Montserrat' ? 'montserrat' : 'akena'}`}
+                          onClick={() => {
+                            setActiveFontFamily(fam.id);
+                            if (selectedElement?.type === 'textured-text') {
+                              updateSelectedTextProperty({
+                                fontFamily: fam.id,
+                                fontStyle:
+                                  fam.id === 'Akena Otos' ? 'editorial-serif' : 'craft-rounded',
+                              });
+                            }
+                          }}
+                          className={`p-2.5 rounded-lg border text-left transition-all ${
+                            isSel
+                              ? 'bg-[#0D66D0] text-white border-[#3B9EFF] shadow'
+                              : `${inputBg} hover:opacity-90`
+                          }`}
+                        >
+                          <div
+                            className="text-sm font-bold truncate"
+                            style={{
+                              fontFamily:
+                                fam.id === 'Montserrat'
+                                  ? '"Montserrat", sans-serif'
+                                  : '"Akena Otos", "Fraunces", Georgia, serif',
+                            }}
+                          >
+                            {fam.label}
+                          </div>
+                          <div className="text-[10px] opacity-80 leading-tight mt-0.5">
+                            18 Declinazioni
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Selettore Tutte le 18 Declinazioni (100 Thin .. 900 Black, Normale & Italic) */}
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="font-declination-select"
+                    className="block text-[11px] font-bold uppercase tracking-wider opacity-80"
+                  >
+                    2. Declinazione ({activeFontFamily} · 18 Varianti)
+                  </label>
+                  <select
+                    id="font-declination-select"
+                    data-testid="font-declination-select"
+                    value={
+                      selectedElement?.type === 'textured-text' && selectedElement.fontWeight
+                        ? `${selectedElement.fontWeight}-${
+                            selectedElement.fontItalic ? 'italic' : 'normal'
+                          }`
+                        : `${activeFontWeight}-${activeFontItalic ? 'italic' : 'normal'}`
+                    }
+                    onChange={(e) => {
+                      const found = FONT_DECLINATIONS.find((d) => d.id === e.target.value);
+                      if (!found) return;
+                      setActiveFontWeight(found.weight);
+                      setActiveFontItalic(found.italic);
+                      if (selectedElement?.type === 'textured-text') {
+                        updateSelectedTextProperty({
+                          fontFamily: selectedElement.fontFamily || activeFontFamily,
+                          fontWeight: found.weight,
+                          fontItalic: found.italic,
+                        });
+                      }
+                    }}
+                    className={`w-full px-3 py-2 rounded-lg border text-xs font-semibold ${inputBg}`}
+                  >
+                    {FONT_DECLINATIONS.map((decl) => (
+                      <option
+                        key={decl.id}
+                        value={decl.id}
+                        className="bg-[#252526] text-white"
+                      >
+                        {activeFontFamily} — {decl.label}
+                      </option>
+                    ))}
+                  </select>
+
+                  {/* Griglia Rapida Pesi 100–900 + Toggle Italic */}
+                  <div className="grid grid-cols-5 gap-1 pt-1">
+                    {([100, 200, 300, 400, 500, 600, 700, 800, 900] as BuilderFontWeight[]).map(
+                      (w) => {
+                        const curW =
+                          selectedElement?.type === 'textured-text' && selectedElement.fontWeight
+                            ? selectedElement.fontWeight
+                            : activeFontWeight;
+                        return (
+                          <button
+                            key={w}
+                            type="button"
+                            onClick={() => {
+                              setActiveFontWeight(w);
+                              if (selectedElement?.type === 'textured-text') {
+                                updateSelectedTextProperty({
+                                  fontFamily: selectedElement.fontFamily || activeFontFamily,
+                                  fontWeight: w,
+                                });
+                              }
+                            }}
+                            className={`py-1 rounded text-[11px] font-mono font-semibold border ${
+                              curW === w
+                                ? 'bg-[#FF9A00] text-black border-[#FF9A00]'
+                                : `${inputBg} opacity-80 hover:opacity-100`
+                            }`}
+                          >
+                            {w}
+                          </button>
+                        );
+                      }
+                    )}
+                    <button
+                      type="button"
+                      data-testid="font-italic-toggle"
+                      onClick={() => {
+                        const nextIt =
+                          selectedElement?.type === 'textured-text'
+                            ? !selectedElement.fontItalic
+                            : !activeFontItalic;
+                        setActiveFontItalic(nextIt);
+                        if (selectedElement?.type === 'textured-text') {
+                          updateSelectedTextProperty({
+                            fontFamily: selectedElement.fontFamily || activeFontFamily,
+                            fontItalic: nextIt,
+                          });
+                        }
+                      }}
+                      className={`py-1 rounded text-[11px] italic font-serif font-bold border ${
+                        (
+                          selectedElement?.type === 'textured-text'
+                            ? selectedElement.fontItalic
+                            : activeFontItalic
+                        )
+                          ? 'bg-[#FF9A00] text-black border-[#FF9A00]'
+                          : `${inputBg} opacity-80 hover:opacity-100`
+                      }`}
+                    >
+                      Italic
+                    </button>
+                  </div>
+                </div>
+
+                {/* Caricamento File Font Originale (.OTF / .TTF / .WOFF2) */}
+                <div className={`p-2.5 rounded-lg border space-y-1.5 ${inputBg}`}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold">
+                      File Font {activeFontFamily} (.OTF / .TTF)
+                    </span>
+                    {customLoadedFonts[activeFontFamily] ? (
+                      <span className="flex items-center gap-1 text-[10px] text-[#4A6B53] font-semibold">
+                        <Check className="w-3 h-3" />
+                        {customLoadedFonts[activeFontFamily]}
+                      </span>
+                    ) : (
+                      <span className={`text-[10px] ${mutedText}`}>Predefinito integrato</span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => fontFileInputRef.current?.click()}
+                    className="w-full py-1.5 px-2.5 rounded bg-white/10 hover:bg-white/15 border border-white/15 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-[#FF9A00]" />
+                    <span>Carica file .OTF / .TTF per {activeFontFamily}</span>
+                  </button>
+                </div>
+
+                {/* Editor Testo Contenuto Casella */}
+                {selectedElement?.type === 'textured-text' && !selectedElement.isHandDrawnText ? (
+                  <div className="space-y-3 pt-2 border-t border-white/10">
+                    <div>
+                      <label
+                        htmlFor="textbox-content-textarea"
+                        className="block text-[11px] font-bold uppercase tracking-wider mb-1"
+                      >
+                        Testo della Casella Selezionata
+                      </label>
+                      <textarea
+                        id="textbox-content-textarea"
+                        data-testid="textbox-content-textarea"
+                        rows={3}
+                        value={selectedElement.textContent || ''}
+                        onChange={(e) =>
+                          updateSelectedTextProperty({ textContent: e.target.value })
+                        }
+                        className={`w-full px-2.5 py-2 text-xs rounded-lg border ${inputBg}`}
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
+                          Corpo Font ({selectedElement.fontSize || 48} pt)
+                        </label>
+                        <input
+                          type="number"
+                          min={12}
+                          max={220}
+                          value={selectedElement.fontSize || 48}
+                          onChange={(e) => {
+                            const v = Math.max(12, Number(e.target.value) || 48);
+                            setActiveFontSize(v);
+                            updateSelectedTextProperty({ fontSize: v });
+                          }}
+                          className={`w-full px-2.5 py-1.5 rounded border text-xs font-mono ${inputBg}`}
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
+                          Larghezza Box ({selectedElement.textBoxWidth || selectedElement.width} px)
+                        </label>
+                        <input
+                          type="number"
+                          min={160}
+                          max={1040}
+                          step={20}
+                          value={selectedElement.textBoxWidth || selectedElement.width || 520}
+                          onChange={(e) => {
+                            const w = Math.max(160, Number(e.target.value) || 520);
+                            updateSelectedTextProperty({ textBoxWidth: w });
+                          }}
+                          className={`w-full px-2.5 py-1.5 rounded border text-xs font-mono ${inputBg}`}
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
+                          Interlinea ({(selectedElement.lineHeight || 1.2).toFixed(2)})
+                        </label>
+                        <input
+                          type="range"
+                          min={0.85}
+                          max={2.2}
+                          step={0.05}
+                          value={selectedElement.lineHeight || 1.2}
+                          onChange={(e) => {
+                            const lh = Number(e.target.value);
+                            setActiveLineHeight(lh);
+                            updateSelectedTextProperty({ lineHeight: lh });
+                          }}
+                          className="w-full accent-[#FF9A00]"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase opacity-75 mb-1">
+                          Tracking ({Math.round((selectedElement.letterSpacing || 0) * 1000)})
+                        </label>
+                        <input
+                          type="range"
+                          min={-0.06}
+                          max={0.35}
+                          step={0.01}
+                          value={selectedElement.letterSpacing || 0}
+                          onChange={(e) => {
+                            const ls = Number(e.target.value);
+                            setActiveLetterSpacing(ls);
+                            updateSelectedTextProperty({ letterSpacing: ls });
+                          }}
+                          className="w-full accent-[#FF9A00]"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Allineamento Paragrafo & Trasformazione Maiuscole/Minuscole */}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className={`flex items-center rounded border p-0.5 ${inputBg}`}>
+                        <button
+                          type="button"
+                          onClick={() => updateSelectedTextProperty({ textAlign: 'left' })}
+                          title="Allinea testo a sinistra"
+                          className={`p-1.5 rounded ${
+                            selectedElement.textAlign === 'left'
+                              ? 'bg-[#0D66D0] text-white'
+                              : 'hover:bg-white/10'
+                          }`}
+                        >
+                          <AlignLeft className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => updateSelectedTextProperty({ textAlign: 'center' })}
+                          title="Centra testo"
+                          className={`p-1.5 rounded ${
+                            (selectedElement.textAlign || 'center') === 'center'
+                              ? 'bg-[#0D66D0] text-white'
+                              : 'hover:bg-white/10'
+                          }`}
+                        >
+                          <AlignCenter className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => updateSelectedTextProperty({ textAlign: 'right' })}
+                          title="Allinea testo a destra"
+                          className={`p-1.5 rounded ${
+                            selectedElement.textAlign === 'right'
+                              ? 'bg-[#0D66D0] text-white'
+                              : 'hover:bg-white/10'
+                          }`}
+                        >
+                          <AlignRight className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      <div
+                        className={`flex items-center rounded border p-0.5 text-[11px] font-mono ${inputBg}`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => updateSelectedTextProperty({ textTransform: 'none' })}
+                          className={`px-2 py-1 rounded ${
+                            (selectedElement.textTransform || 'none') === 'none'
+                              ? 'bg-[#0D66D0] text-white'
+                              : ''
+                          }`}
+                        >
+                          Aa
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => updateSelectedTextProperty({ textTransform: 'uppercase' })}
+                          className={`px-2 py-1 rounded ${
+                            selectedElement.textTransform === 'uppercase'
+                              ? 'bg-[#0D66D0] text-white'
+                              : ''
+                          }`}
+                        >
+                          AA
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => updateSelectedTextProperty({ textTransform: 'lowercase' })}
+                          className={`px-2 py-1 rounded ${
+                            selectedElement.textTransform === 'lowercase'
+                              ? 'bg-[#0D66D0] text-white'
+                              : ''
+                          }`}
+                        >
+                          aa
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className={`p-3 rounded-lg border text-xs ${inputBg}`}>
+                    Seleziona un livello di testo sulla tavola oppure clicca{' '}
+                    <strong>&ldquo;+ Casella di Testo&rdquo;</strong> (tasto{' '}
+                    <kbd className="px-1.5 py-0.5 rounded bg-black/30 font-mono">T</kbd>) per
+                    scrivere con <strong>Montserrat</strong> o <strong>Akena Otos</strong>.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ==================== TAB 3: SEZIONE "CARICAMENTI" PNG STILE CANVA ==================== */}
+            {rightDockTab === 'uploads' && (
+              <div data-testid="uploads-studio-panel" className="space-y-4">
+                <div className="space-y-1">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-[#FF9A00]">
+                    Caricamenti PNG &amp; Sticker (Stile Canva)
+                  </h3>
+                  <p className={`text-[11px] ${mutedText}`}>
+                    Carica file PNG trasparenti, illustrazioni o loghi da usare liberamente nelle tue locandine.
+                  </p>
+                </div>
+
+                {/* Dropzone / Bottone Carica File PNG */}
+                <button
+                  type="button"
+                  data-testid="upload-png-trigger-btn"
+                  onClick={() => pngUploadInputRef.current?.click()}
+                  className="w-full py-3.5 px-4 rounded-xl bg-[#0D66D0] hover:bg-[#0952a8] text-white font-bold text-xs flex items-center justify-center gap-2 shadow-md transition-colors"
+                >
+                  <Upload className="w-4 h-4" />
+                  <span>Carica file PNG / Immagini</span>
+                </button>
+
+                {/* Se c'è un Partner attivo, mostra anche l'accesso rapido al Logo Partner */}
+                {activePartner && (
+                  <div className={`p-3 rounded-lg border space-y-2 ${inputBg}`}>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold text-[#B85B43]">
+                        Logo Partner: {activePartner.name}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => partnerLogoInputRef.current?.click()}
+                        className="text-[10px] font-semibold text-[#3B9EFF] hover:underline"
+                      >
+                        {activePartner.logoImageUrl ? 'Cambia Logo' : '+ Carica Logo'}
+                      </button>
+                    </div>
+                    {activePartner.logoImageUrl ? (
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="w-12 h-12 rounded bg-white p-1 flex items-center justify-center shrink-0">
+                          <img
+                            src={activePartner.logoImageUrl}
+                            alt={activePartner.name}
+                            className="max-w-full max-h-full object-contain"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            insertPngAssetOnCanvas({
+                              id: `partner-logo-${activePartner.id}`,
+                              name: `Logo ${activePartner.name}`,
+                              dataUrl: activePartner.logoImageUrl!,
+                              width: 260,
+                              height: 160,
+                              createdAt: Date.now(),
+                            })
+                          }
+                          className="flex-1 py-1.5 px-2.5 rounded bg-[#B85B43] text-white text-[11px] font-semibold"
+                        >
+                          + Inserisci Logo {activePartner.name}
+                        </button>
+                      </div>
+                    ) : (
+                      <p className={`text-[10px] ${mutedText}`}>
+                        Nessun file logo caricato per {activePartner.name}. Clicca &ldquo;+ Carica Logo&rdquo; per aggiungerlo.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Griglia Libreria Caricamenti PNG */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider opacity-80">
+                      La tua Libreria PNG ({uploadedPngs.length})
+                    </span>
+                    <span className={`text-[10px] ${mutedText}`}>Clicca per inserire</span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2.5">
+                    {uploadedPngs.map((asset) => (
+                      <div
+                        key={asset.id}
+                        data-testid={`uploaded-png-card-${asset.id}`}
+                        className={`group relative rounded-lg border overflow-hidden flex flex-col ${inputBg}`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => insertPngAssetOnCanvas(asset)}
+                          className="h-28 w-full p-2 flex items-center justify-center bg-[radial-gradient(#88888833_1px,transparent_1px)] [background-size:10px_10px] hover:scale-105 transition-transform"
+                        >
+                          <img
+                            src={asset.dataUrl}
+                            alt={asset.name}
+                            className="max-h-full max-w-full object-contain drop-shadow"
+                          />
+                        </button>
+                        <div className="p-2 border-t border-white/10 flex items-center justify-between gap-1">
+                          <span className="text-[11px] font-semibold truncate">{asset.name}</span>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => insertPngAssetOnCanvas(asset)}
+                              title="Inserisci sulla locandina"
+                              className="px-1.5 py-0.5 rounded bg-[#0D66D0] text-white text-[10px] font-bold"
+                            >
+                              + Usa
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveUploadedPng(asset.id)}
+                              title="Elimina dalla libreria"
+                              className="p-1 rounded text-[#B85B43] hover:bg-[#B85B43]/20"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ==================== TAB 4: LIVELLI Z-INDEX, PARTNER KIT & CLIPBOARD ==================== */}
             {rightDockTab === 'layers' && (
               <div data-testid="layers-studio-panel" className="space-y-4">
-                {/* Partner Brand Kit Selector */}
-                <div className={`p-2.5 rounded-lg border space-y-2 ${inputBg}`}>
-                  <div className="flex items-center gap-1.5">
-                    <Building2 className="w-3.5 h-3.5 text-[#B85B43]" />
-                    <label
-                      htmlFor="builder-partner-dropdown"
-                      className="text-[11px] font-bold uppercase"
-                    >
-                      Partner Brand Kit
-                    </label>
+                {/* Partner Brand Kit Selector + Caricamento File Logo Partner */}
+                <div className={`p-3 rounded-lg border space-y-2.5 ${inputBg}`}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      <Building2 className="w-3.5 h-3.5 text-[#B85B43]" />
+                      <label
+                        htmlFor="builder-partner-dropdown"
+                        className="text-[11px] font-bold uppercase"
+                      >
+                        Partner Brand &amp; Logo
+                      </label>
+                    </div>
+                    {activePartner && (
+                      <button
+                        type="button"
+                        data-testid="builder-upload-partner-logo-btn"
+                        onClick={() => partnerLogoInputRef.current?.click()}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#0D66D0] text-white text-[10px] font-semibold"
+                      >
+                        <Upload className="w-3 h-3" />
+                        <span>
+                          {activePartner.logoImageUrl ? 'Cambia Logo' : 'Carica Logo Partner'}
+                        </span>
+                      </button>
+                    )}
                   </div>
+
                   <select
                     id="builder-partner-dropdown"
                     data-testid="builder-partner-dropdown"
@@ -3662,32 +4755,55 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                     </option>
                     {partners.map((p) => (
                       <option key={p.id} value={p.id} className="bg-[#252526] text-white">
-                        {p.name} ({p.logoText})
+                        {p.name} ({p.logoImageUrl ? 'Logo File + ' : ''}
+                        {p.logoText})
                       </option>
                     ))}
                   </select>
+
                   {activePartner && (
-                    <button
-                      type="button"
-                      onClick={handleInsertFullPartnerKitOnCanvas}
-                      className="w-full py-1 px-2 bg-[#B85B43] text-white rounded text-[11px] font-semibold"
-                    >
-                      + Inserisci Logo &amp; Macchia {activePartner.name}
-                    </button>
+                    <div className="space-y-2 pt-1">
+                      {activePartner.logoImageUrl && (
+                        <div className="flex items-center gap-2 p-2 rounded bg-black/20 border border-white/10">
+                          <div className="w-10 h-10 rounded bg-white p-1 flex items-center justify-center shrink-0">
+                            <img
+                              src={activePartner.logoImageUrl}
+                              alt={`Logo ${activePartner.name}`}
+                              className="max-w-full max-h-full object-contain"
+                            />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-[11px] font-bold truncate">
+                              Logo {activePartner.name}
+                            </div>
+                            <div className={`text-[10px] ${mutedText}`}>
+                              Pronto per la locandina
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleInsertFullPartnerKitOnCanvas}
+                        className="w-full py-1.5 px-2 bg-[#B85B43] text-white rounded text-[11px] font-semibold"
+                      >
+                        + Inserisci Logo &amp; Macchia {activePartner.name}
+                      </button>
+                    </div>
                   )}
                 </div>
 
-                {/* Lista Livelli Vettoriali */}
+                {/* Lista Livelli Vettoriali (Supporta anche Shift+Clic per Selezione Multipla) */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <span className="text-[11px] font-bold uppercase tracking-wider opacity-80">
-                      Gerarchia Livelli (Z-Index)
+                      Gerarchia Livelli (Shift+Clic multipli)
                     </span>
                     <button
                       type="button"
                       onClick={() => {
                         commitElementsChange(() => []);
-                        setSelectedId(null);
+                        selectSingleElement(null);
                       }}
                       className="text-[11px] font-semibold text-[#B85B43] hover:underline"
                     >
@@ -3697,14 +4813,18 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
 
                   <div className="max-h-64 overflow-y-auto space-y-1 pr-1">
                     {[...sortedElements].reverse().map((el) => {
-                      const isSel = el.id === selectedId;
+                      const isSel = el.id === selectedId || selectedIds.includes(el.id);
                       return (
                         <div
                           key={el.id}
-                          onClick={() => {
-                            setSelectedId(el.id);
-                            if (el.type === 'textured-text') {
-                              setRightDockTab('character');
+                          onClick={(ev) => {
+                            if (ev.shiftKey) {
+                              toggleMultiSelectElement(el.id);
+                            } else {
+                              selectSingleElement(el.id);
+                              if (el.type === 'textured-text') {
+                                setRightDockTab('character');
+                              }
                             }
                           }}
                           className={`flex items-center justify-between px-2.5 py-1.5 rounded border text-xs cursor-pointer transition-colors ${
@@ -3716,7 +4836,10 @@ export const GraphicBuilder: React.FC<GraphicBuilderProps> = ({
                           <div className="flex items-center gap-2 min-w-0">
                             <span
                               className="w-3 h-3 rounded-sm border border-white/40 shrink-0"
-                              style={{ backgroundColor: el.color }}
+                              style={{
+                                backgroundColor:
+                                  el.color && el.color !== 'none' ? el.color : '#FF9A00',
+                              }}
                             />
                             <span className="truncate font-medium">{el.name}</span>
                           </div>
